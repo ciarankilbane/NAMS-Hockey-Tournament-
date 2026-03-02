@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Trophy, Users, Calendar, Settings, ShieldCheck, AlertCircle, CheckCircle2, Clock, ChevronRight, Plus, Trash2, RefreshCw } from 'lucide-react';
+import { Trophy, Users, Calendar, Settings, ShieldCheck, AlertCircle, CheckCircle2, Clock, ChevronRight, Plus, Trash2, RefreshCw, Search, Edit2, X, MapPin } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -1026,9 +1026,18 @@ const AdminPanel: React.FC<{
   const [breakLabel, setBreakLabel] = useState('');
   const [breakTime, setBreakTime] = useState('');
   const [breakPitch, setBreakPitch] = useState('');
+  const [matchSearch, setMatchSearch] = useState('');
 
   const filteredTeams = teams.filter(t => t.tournament_type === tournamentType);
   const filteredMatches = matches.filter(m => m.tournament_type === tournamentType);
+  const allMatches = matches; // We show all matches in the manager
+  
+  const searchedMatches = allMatches.filter(m => 
+    m.team1_name?.toLowerCase().includes(matchSearch.toLowerCase()) ||
+    m.team2_name?.toLowerCase().includes(matchSearch.toLowerCase()) ||
+    m.umpire?.toLowerCase().includes(matchSearch.toLowerCase()) ||
+    m.stage?.toLowerCase().includes(matchSearch.toLowerCase())
+  );
 
   const addTeam = async () => {
     if (!newTeamName) return;
@@ -1086,7 +1095,8 @@ const AdminPanel: React.FC<{
 
   const [isSavingMatch, setIsSavingMatch] = useState<number | null>(null);
 
-  const updateMatch = async (matchId: number) => {
+  const updateMatch = async (matchId: number | null) => {
+    if (matchId === null) return;
     console.log('Attempting to update match:', { 
       matchId, 
       score1: editScore1, 
@@ -1525,36 +1535,46 @@ const AdminPanel: React.FC<{
       </div>
 
       <section className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
-        <div className="px-6 py-4 border-b border-stone-100">
+        <div className="px-6 py-4 border-b border-stone-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <h3 className="text-lg font-bold flex items-center gap-2">
             <RefreshCw className="w-5 h-5 text-maroon-700" />
-            Edit Match Scores
+            Match Manager
           </h3>
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+            <input 
+              type="text"
+              placeholder="Search teams, umpires, or stages..."
+              value={matchSearch}
+              onChange={(e) => setMatchSearch(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:ring-2 focus:ring-maroon-500 outline-none transition-all"
+            />
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="bg-stone-50 text-stone-500 text-xs font-bold uppercase tracking-wider">
-                <th className="px-6 py-3">Match</th>
-                <th className="px-6 py-3">Time/Pitch</th>
+                <th className="px-6 py-3">Match Details</th>
+                <th className="px-6 py-3">Time & Pitch</th>
                 <th className="px-6 py-3">Umpire</th>
                 <th className="px-6 py-3">Status</th>
                 <th className="px-6 py-3">Score</th>
-                <th className="px-6 py-3">Action</th>
+                <th className="px-6 py-3 text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-stone-100">
-              {[...matches]
+              {[...searchedMatches]
                 .sort((a, b) => (a.start_time || '').localeCompare(b.start_time || '') || a.tournament_type.localeCompare(b.tournament_type))
                 .map(match => (
                 <tr key={match.id} className={cn(
-                  "hover:bg-stone-50 transition-colors",
+                  "hover:bg-stone-50 transition-colors group",
                   match.tournament_type !== tournamentType && "opacity-60 bg-stone-50/50"
                 )}>
-                  <td className="px-6 py-4 text-sm font-medium">
+                  <td className="px-6 py-4">
                     <div className="flex flex-col">
                       <div className="flex items-center gap-2">
-                        <span>{match.team1_name} vs {match.team2_name}</span>
+                        <span className="font-bold text-stone-900">{match.team1_name} vs {match.team2_name}</span>
                         <span className={cn(
                           "text-[8px] font-black uppercase px-1.5 py-0.5 rounded border",
                           match.tournament_type === 'competitive' ? "bg-maroon-50 text-maroon-700 border-maroon-100" : "bg-stone-100 text-stone-600 border-stone-200"
@@ -1562,152 +1582,226 @@ const AdminPanel: React.FC<{
                           {match.tournament_type}
                         </span>
                       </div>
-                      <span className="text-[10px] text-stone-400 uppercase">{match.stage}</span>
+                      <span className="text-[10px] text-stone-400 font-bold uppercase tracking-wider">{match.stage}</span>
                     </div>
                   </td>
-                  <td className="px-6 py-4 text-sm">
-                    {editingMatchId === match.id ? (
-                      <div className="flex flex-col gap-1">
-                        <input 
-                          type="text" 
-                          value={editStartTime}
-                          onChange={(e) => setEditStartTime(e.target.value)}
-                          placeholder="Time (e.g. 10:00)"
-                          className="w-24 border rounded px-1 py-1 text-xs"
-                        />
-                        <input 
-                          type="text" 
-                          value={editPitch}
-                          onChange={(e) => setEditPitch(e.target.value)}
-                          placeholder="Pitch"
-                          className="w-24 border rounded px-1 py-1 text-xs"
-                        />
+                  <td className="px-6 py-4">
+                    <div className="flex flex-col">
+                      <div className="flex items-center gap-1.5 text-maroon-700 font-bold text-sm">
+                        <Clock className="w-3 h-3" />
+                        {match.start_time || 'TBD'}
+                      </div>
+                      <div className="flex items-center gap-1.5 text-stone-500 text-xs">
+                        <MapPin className="w-3 h-3" />
+                        Pitch {match.pitch || 'TBD'}
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-6 py-4">
+                    {match.umpire ? (
+                      <div className="flex items-center gap-2 text-sm font-medium text-stone-800">
+                        <div className="w-6 h-6 rounded-full bg-maroon-100 flex items-center justify-center text-[10px] text-maroon-700 font-bold">
+                          {match.umpire.charAt(0).toUpperCase()}
+                        </div>
+                        {match.umpire}
                       </div>
                     ) : (
-                      <div className="flex flex-col">
-                        <span className="font-bold text-maroon-700">{match.start_time || 'TBD'}</span>
-                        <span className="text-xs text-stone-500">Pitch {match.pitch || 'TBD'}</span>
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-6 py-4 text-sm">
-                    {editingMatchId === match.id ? (
-                      <input 
-                        type="text" 
-                        value={editUmpire}
-                        onChange={(e) => setEditUmpire(e.target.value)}
-                        placeholder="Umpire Name"
-                        className="w-32 border rounded px-2 py-1 text-xs"
-                      />
-                    ) : (
-                      match.umpire ? (
-                        <span className="font-medium text-stone-800">{match.umpire}</span>
-                      ) : (
-                        <button 
-                          onClick={() => {
-                            setEditingMatchId(match.id);
-                            setEditScore1(match.score1);
-                            setEditScore2(match.score2);
-                            setEditStatus(match.status);
-                            setEditStartTime(match.start_time || '');
-                            setEditPitch(match.pitch || '');
-                            setEditUmpire('');
-                          }}
-                          className="text-[10px] bg-maroon-50 text-maroon-700 px-2 py-1 rounded-lg font-bold hover:bg-maroon-100 transition-all border border-maroon-100"
-                        >
-                          Assign Umpire
-                        </button>
-                      )
-                    )}
-                  </td>
-                  <td className="px-6 py-4 text-sm">
-                    {editingMatchId === match.id ? (
-                      <select 
-                        value={editStatus}
-                        onChange={(e) => setEditStatus(e.target.value as any)}
-                        className="bg-white border rounded px-2 py-1 text-xs"
-                      >
-                        <option value="scheduled">Scheduled</option>
-                        <option value="pending">Pending</option>
-                        <option value="completed">Completed</option>
-                      </select>
-                    ) : (
-                      <span className={cn(
-                        "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
-                        match.status === 'completed' ? "bg-green-100 text-green-700" :
-                        match.status === 'pending' ? "bg-maroon-100 text-maroon-700" : "bg-stone-100 text-stone-600"
-                      )}>
-                        {match.status}
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-6 py-4 text-sm font-bold">
-                    {editingMatchId === match.id ? (
-                      <div className="flex items-center gap-2">
-                        <input 
-                          type="number" 
-                          value={editScore1}
-                          onChange={(e) => setEditScore1(Number(e.target.value))}
-                          className="w-12 border rounded px-1 py-1 text-center"
-                        />
-                        <span>-</span>
-                        <input 
-                          type="number" 
-                          value={editScore2}
-                          onChange={(e) => setEditScore2(Number(e.target.value))}
-                          className="w-12 border rounded px-1 py-1 text-center"
-                        />
-                      </div>
-                    ) : (
-                      <span>{match.score1} - {match.score2}</span>
+                      <span className="text-xs text-stone-400 italic">No umpire</span>
                     )}
                   </td>
                   <td className="px-6 py-4">
-                    {editingMatchId === match.id ? (
-                      <div className="flex gap-2">
-                        <button 
-                          onClick={() => updateMatch(match.id)}
-                          disabled={isSavingMatch === match.id}
-                          className="text-xs bg-maroon-700 text-white px-3 py-1 rounded-lg font-bold hover:bg-maroon-800 transition-all disabled:opacity-50"
-                        >
-                          {isSavingMatch === match.id ? 'Saving...' : 'Save'}
-                        </button>
-                        <button 
-                          onClick={() => setEditingMatchId(null)}
-                          disabled={isSavingMatch === match.id}
-                          className="text-xs bg-stone-200 text-stone-700 px-3 py-1 rounded-lg font-bold hover:bg-stone-300 transition-all disabled:opacity-50"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <button 
-                        onClick={() => {
-                          setEditingMatchId(match.id);
-                          setEditScore1(match.score1);
-                          setEditScore2(match.score2);
-                          setEditStatus(match.status);
-                          setEditStartTime(match.start_time || '');
-                          setEditPitch(match.pitch || '');
-                          setEditUmpire(match.umpire || '');
-                        }}
-                        className="text-xs bg-stone-100 text-stone-700 px-3 py-1 rounded-lg font-bold hover:bg-stone-200 transition-all"
-                      >
-                        Edit
-                      </button>
-                    )}
+                    <span className={cn(
+                      "px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider inline-flex items-center gap-1.5",
+                      match.status === 'completed' ? "bg-green-100 text-green-700" :
+                      match.status === 'pending' ? "bg-amber-100 text-amber-700" : "bg-stone-100 text-stone-600"
+                    )}>
+                      <div className={cn(
+                        "w-1.5 h-1.5 rounded-full",
+                        match.status === 'completed' ? "bg-green-500" :
+                        match.status === 'pending' ? "bg-amber-500" : "bg-stone-400"
+                      )} />
+                      {match.status}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4">
+                    <div className="font-mono font-bold text-lg text-stone-800">
+                      {match.score1} - {match.score2}
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 text-right">
+                    <button 
+                      onClick={() => {
+                        setEditingMatchId(match.id);
+                        setEditScore1(match.score1);
+                        setEditScore2(match.score2);
+                        setEditStatus(match.status);
+                        setEditStartTime(match.start_time || '');
+                        setEditPitch(match.pitch || '');
+                        setEditUmpire(match.umpire || '');
+                      }}
+                      className="inline-flex items-center gap-2 bg-stone-100 text-stone-600 hover:bg-maroon-700 hover:text-white px-4 py-2 rounded-xl text-xs font-bold transition-all"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                      Edit
+                    </button>
                   </td>
                 </tr>
               ))}
-              {matches.filter(m => m.tournament_type === tournamentType).length === 0 && (
+              {searchedMatches.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-6 py-8 text-center text-stone-400 italic">No matches in this tournament</td>
+                  <td colSpan={6} className="px-6 py-12 text-center">
+                    <div className="flex flex-col items-center gap-2 text-stone-400">
+                      <Search className="w-8 h-8 opacity-20" />
+                      <p className="italic">No matches found matching your search</p>
+                    </div>
+                  </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
       </section>
+
+      {/* Match Editor Modal */}
+      {editingMatchId && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <motion.div 
+            initial={{ scale: 0.95, opacity: 0, y: 20 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden"
+          >
+            <div className="bg-maroon-700 p-6 text-white flex justify-between items-center">
+              <div>
+                <h3 className="text-xl font-bold">Edit Match</h3>
+                <p className="text-maroon-100 text-xs font-medium uppercase tracking-widest mt-1">
+                  {matches.find(m => m.id === editingMatchId)?.team1_name} vs {matches.find(m => m.id === editingMatchId)?.team2_name}
+                </p>
+              </div>
+              <button 
+                onClick={() => setEditingMatchId(null)}
+                className="p-2 hover:bg-white/10 rounded-full transition-colors"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+            
+            <div className="p-8 space-y-6">
+              <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-stone-500 uppercase tracking-wider">Start Time</label>
+                  <div className="relative">
+                    <Clock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+                    <input 
+                      type="text" 
+                      value={editStartTime}
+                      onChange={(e) => setEditStartTime(e.target.value)}
+                      placeholder="e.g. 10:00"
+                      className="w-full pl-10 pr-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-stone-500 uppercase tracking-wider">Pitch</label>
+                  <div className="relative">
+                    <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+                    <input 
+                      type="text" 
+                      value={editPitch}
+                      onChange={(e) => setEditPitch(e.target.value)}
+                      placeholder="Pitch #"
+                      className="w-full pl-10 pr-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-stone-500 uppercase tracking-wider">Umpire Assignment</label>
+                <div className="relative flex gap-2">
+                  <div className="relative flex-1">
+                    <Users className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+                    <input 
+                      type="text" 
+                      value={editUmpire}
+                      onChange={(e) => setEditUmpire(e.target.value)}
+                      placeholder="Enter umpire's full name"
+                      className="w-full pl-10 pr-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
+                    />
+                  </div>
+                  {editUmpire && (
+                    <button 
+                      onClick={() => setEditUmpire('')}
+                      className="px-3 bg-stone-100 text-stone-500 rounded-xl hover:bg-stone-200 transition-all text-xs font-bold"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-stone-500 uppercase tracking-wider">Status</label>
+                  <select 
+                    value={editStatus}
+                    onChange={(e) => setEditStatus(e.target.value as any)}
+                    className="w-full px-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:ring-2 focus:ring-maroon-500 outline-none appearance-none"
+                  >
+                    <option value="scheduled">Scheduled</option>
+                    <option value="pending">Pending</option>
+                    <option value="completed">Completed</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-stone-500 uppercase tracking-wider">Final Score</label>
+                  <div className="flex items-center gap-3">
+                    <input 
+                      type="number" 
+                      value={editScore1}
+                      onChange={(e) => setEditScore1(Number(e.target.value))}
+                      className="w-full px-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-center font-bold text-lg focus:ring-2 focus:ring-maroon-500 outline-none"
+                    />
+                    <span className="font-bold text-stone-400">-</span>
+                    <input 
+                      type="number" 
+                      value={editScore2}
+                      onChange={(e) => setEditScore2(Number(e.target.value))}
+                      className="w-full px-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-center font-bold text-lg focus:ring-2 focus:ring-maroon-500 outline-none"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex gap-4 pt-4">
+                <button 
+                  onClick={() => updateMatch(editingMatchId)}
+                  disabled={isSavingMatch === editingMatchId}
+                  className="flex-1 bg-maroon-700 text-white font-bold py-4 rounded-2xl hover:bg-maroon-800 transition-all shadow-lg shadow-maroon-100 disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isSavingMatch === editingMatchId ? (
+                    <>
+                      <RefreshCw className="w-5 h-5 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-5 h-5" />
+                      Save Changes
+                    </>
+                  )}
+                </button>
+                <button 
+                  onClick={() => setEditingMatchId(null)}
+                  disabled={isSavingMatch === editingMatchId}
+                  className="px-8 bg-stone-100 text-stone-600 font-bold py-4 rounded-2xl hover:bg-stone-200 transition-all disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        </div>
+      )}
 
       <section className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
         <div className="px-6 py-4 border-b border-stone-100">
