@@ -1,0 +1,5 @@
+{
+  "name": "NAMS Hockey Tournament",
+  "description": "A real-time tournament management system for NAMS Hockey, featuring simultaneous chill and competitive tournaments, team scheduling, and score reporting.",
+  "requestFramePermissions": []
+}
