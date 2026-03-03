@@ -86,15 +86,22 @@ export default function App() {
   );
 
   const standings = useMemo(() => {
-    const stats: Record<number, { name: string, played: number, won: number, drawn: number, lost: number, gf: number, ga: number, pts: number }> = {};
+    const groupStats: Record<string, Record<number, { name: string, played: number, won: number, drawn: number, lost: number, gf: number, ga: number, pts: number, group: string, id: number }>> = {};
     
     filteredTeams.forEach(team => {
-      stats[team.id] = { name: team.name, played: 0, won: 0, drawn: 0, lost: 0, gf: 0, ga: 0, pts: 0 };
+      const g = team.group_name || 'Unassigned';
+      if (!groupStats[g]) groupStats[g] = {};
+      groupStats[g][team.id] = { name: team.name, played: 0, won: 0, drawn: 0, lost: 0, gf: 0, ga: 0, pts: 0, group: g, id: team.id };
     });
 
     filteredMatches.filter(m => m.status === 'completed' && m.stage === 'round-robin').forEach(match => {
-      const t1 = stats[match.team1_id];
-      const t2 = stats[match.team2_id];
+      // Find which group this match belongs to (assuming both teams are in the same group)
+      const team1 = data.teams.find(t => t.id === match.team1_id);
+      if (!team1) return;
+      const g = team1.group_name || 'Unassigned';
+      
+      const t1 = groupStats[g]?.[match.team1_id];
+      const t2 = groupStats[g]?.[match.team2_id];
       if (!t1 || !t2) return;
 
       t1.played++;
@@ -120,8 +127,18 @@ export default function App() {
       }
     });
 
-    return Object.values(stats).sort((a, b) => b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf);
-  }, [filteredTeams, filteredMatches]);
+    const result: Record<string, any[]> = {};
+    Object.keys(groupStats).sort().forEach(g => {
+      result[g] = Object.values(groupStats[g]).sort((a, b) => b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf);
+    });
+    return result;
+  }, [filteredTeams, filteredMatches, data.teams]);
+
+  const bestSecondPlace = useMemo(() => {
+    if (tournamentType !== 'chill') return null;
+    const seconds = Object.values(standings).map(group => group[1]).filter(Boolean);
+    return seconds.sort((a, b) => b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf)[0] || null;
+  }, [standings, tournamentType]);
 
   if (loading) {
     return (
@@ -293,41 +310,53 @@ export default function App() {
                       <Users className="w-5 h-5 text-maroon-700" />
                       Standings
                     </h2>
+                    {tournamentType === 'chill' && bestSecondPlace && (
+                      <span className="text-[10px] font-bold bg-maroon-50 text-maroon-700 px-2 py-1 rounded border border-maroon-100">
+                        Best 2nd: {bestSecondPlace.name}
+                      </span>
+                    )}
                   </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className="bg-stone-50 text-stone-500 text-xs font-bold uppercase tracking-wider">
-                          <th className="px-6 py-3">Pos</th>
-                          <th className="px-6 py-3">Team</th>
-                          <th className="px-6 py-3 text-center">P</th>
-                          <th className="px-6 py-3 text-center">W</th>
-                          <th className="px-6 py-3 text-center">D</th>
-                          <th className="px-6 py-3 text-center">L</th>
-                          <th className="px-6 py-3 text-center">GD</th>
-                          <th className="px-6 py-3 text-center">Pts</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-stone-100">
-                        {standings.map((team, idx) => (
-                          <tr key={team.name} className="hover:bg-stone-50 transition-colors">
-                            <td className="px-6 py-4 font-mono text-sm text-stone-400">{idx + 1}</td>
-                            <td className="px-6 py-4 font-bold text-stone-800">{team.name}</td>
-                            <td className="px-6 py-4 text-center text-sm">{team.played}</td>
-                            <td className="px-6 py-4 text-center text-sm">{team.won}</td>
-                            <td className="px-6 py-4 text-center text-sm">{team.drawn}</td>
-                            <td className="px-6 py-4 text-center text-sm">{team.lost}</td>
-                            <td className="px-6 py-4 text-center text-sm font-medium text-stone-600">{(team.gf - team.ga) > 0 ? `+${team.gf - team.ga}` : team.gf - team.ga}</td>
-                            <td className="px-6 py-4 text-center font-bold text-maroon-800">{team.pts}</td>
-                          </tr>
-                        ))}
-                        {standings.length === 0 && (
-                          <tr>
-                            <td colSpan={8} className="px-6 py-12 text-center text-stone-400 italic">No teams added yet</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
+                  <div className="divide-y divide-stone-100">
+                    {(Object.entries(standings) as [string, any[]][]).map(([groupName, teams]) => (
+                      <div key={groupName} className="pb-4">
+                        <div className="bg-stone-50 px-6 py-2 text-[10px] font-black uppercase tracking-widest text-stone-400">
+                          Group {groupName}
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse min-w-[600px]">
+                            <thead>
+                              <tr className="text-stone-500 text-[10px] font-bold uppercase tracking-wider">
+                                <th className="px-6 py-2">Pos</th>
+                                <th className="px-6 py-2">Team</th>
+                                <th className="px-6 py-2 text-center">P</th>
+                                <th className="px-6 py-2 text-center">W</th>
+                                <th className="px-6 py-2 text-center">D</th>
+                                <th className="px-6 py-2 text-center">L</th>
+                                <th className="px-6 py-2 text-center">Pts</th>
+                                <th className="px-6 py-2 text-center">GD</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-stone-50">
+                              {teams.map((team, idx) => (
+                                <tr key={team.name} className="hover:bg-stone-50 transition-colors">
+                                  <td className="px-6 py-3 font-mono text-xs text-stone-400">{idx + 1}</td>
+                                  <td className="px-6 py-3 font-bold text-stone-800 text-sm">{team.name}</td>
+                                  <td className="px-6 py-3 text-center text-xs">{team.played}</td>
+                                  <td className="px-6 py-3 text-center text-xs">{team.won}</td>
+                                  <td className="px-6 py-3 text-center text-xs">{team.drawn}</td>
+                                  <td className="px-6 py-3 text-center text-xs">{team.lost}</td>
+                                  <td className="px-6 py-3 text-center font-bold text-maroon-800 text-sm">{team.pts}</td>
+                                  <td className="px-6 py-3 text-center text-xs font-medium text-stone-600">{(team.gf - team.ga) > 0 ? `+${team.gf - team.ga}` : team.gf - team.ga}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ))}
+                    {Object.keys(standings).length === 0 && (
+                      <div className="px-6 py-12 text-center text-stone-400 italic">No teams added yet</div>
+                    )}
                   </div>
                 </section>
 
@@ -352,6 +381,38 @@ export default function App() {
 
               {/* Knockout Stages */}
               <div className="space-y-6">
+                {tournamentType === 'competitive' && (
+                  <>
+                    <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
+                      <h3 className="font-bold mb-4 flex items-center gap-2 text-maroon-900">
+                        <Trophy className="w-4 h-4 text-maroon-600" />
+                        8v9 Play-off
+                      </h3>
+                      <div className="space-y-3">
+                        {filteredMatches.filter(m => m.stage === 'play-off-8v9').map(match => (
+                          <MatchCard key={match.id} match={match} />
+                        ))}
+                        {filteredMatches.filter(m => m.stage === 'play-off-8v9').length === 0 && (
+                          <p className="text-sm text-stone-400 italic">To be determined...</p>
+                        )}
+                      </div>
+                    </section>
+                    <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
+                      <h3 className="font-bold mb-4 flex items-center gap-2 text-maroon-900">
+                        <Trophy className="w-4 h-4 text-maroon-600" />
+                        Quarter-Finals
+                      </h3>
+                      <div className="space-y-3">
+                        {filteredMatches.filter(m => m.stage === 'quarter-final').map(match => (
+                          <MatchCard key={match.id} match={match} />
+                        ))}
+                        {filteredMatches.filter(m => m.stage === 'quarter-final').length === 0 && (
+                          <p className="text-sm text-stone-400 italic">To be determined...</p>
+                        )}
+                      </div>
+                    </section>
+                  </>
+                )}
                 <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
                   <h3 className="font-bold mb-4 flex items-center gap-2 text-maroon-900">
                     <Trophy className="w-4 h-4 text-maroon-600" />
@@ -369,28 +430,14 @@ export default function App() {
                 <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
                   <h3 className="font-bold mb-4 flex items-center gap-2 text-maroon-900">
                     <Trophy className="w-4 h-4 text-black" />
-                    Final
+                    Final & 3rd Place
                   </h3>
                   <div className="space-y-3">
-                    {filteredMatches.filter(m => m.stage === 'final').map(match => (
+                    {filteredMatches.filter(m => m.stage === 'final' || m.stage === '3rd-4th-play-off').map(match => (
                       <MatchCard key={match.id} match={match} />
                     ))}
-                    {filteredMatches.filter(m => m.stage === 'final').length === 0 && (
+                    {filteredMatches.filter(m => m.stage === 'final' || m.stage === '3rd-4th-play-off').length === 0 && (
                       <p className="text-sm text-stone-400 italic">To be determined...</p>
-                    )}
-                  </div>
-                </section>
-                <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
-                  <h3 className="font-bold mb-4 flex items-center gap-2 text-stone-700">
-                    <Calendar className="w-4 h-4 text-stone-500" />
-                    Play-offs
-                  </h3>
-                  <div className="space-y-3">
-                    {filteredMatches.filter(m => m.stage === 'play-off').map(match => (
-                      <MatchCard key={match.id} match={match} />
-                    ))}
-                    {filteredMatches.filter(m => m.stage === 'play-off').length === 0 && (
-                      <p className="text-sm text-stone-400 italic">No play-offs yet.</p>
                     )}
                   </div>
                 </section>
@@ -502,6 +549,7 @@ export default function App() {
                   matches={data.matches} 
                   tournamentType={tournamentType} 
                   standings={standings}
+                  bestSecondPlace={bestSecondPlace}
                   submissions={data.submissions}
                   onRefresh={fetchData}
                 />
@@ -581,7 +629,7 @@ const MatchCard: React.FC<{ match: Match }> = ({ match }) => {
           <div className="flex items-center gap-2 mt-0.5">
             <span className="text-[10px] font-bold text-maroon-700 flex items-center gap-1">
               <Clock className="w-3 h-3" />
-              {match.start_time || 'TBD'}
+              {match.match_date ? `${match.match_date.slice(5)} ${match.start_time}` : match.start_time || 'TBD'}
             </span>
             {match.pitch && (
               <span className="text-[10px] font-bold text-stone-500 flex items-center gap-1">
@@ -635,23 +683,26 @@ function LiveDashboard({ matches }: { matches: Match[] }) {
   }, []);
 
   const pitches = useMemo(() => {
-    const p = new Set<string>();
-    matches.forEach(m => {
-      if (m.pitch) p.add(m.pitch);
-    });
-    // If no pitches assigned yet, default to at least 1 and 2 if we want to show something
-    if (p.size === 0) return ['1', '2'];
-    return Array.from(p).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  }, [matches]);
+    // Limit to 2 pitches as requested
+    return ['1', '2'];
+  }, []);
 
   const liveMatchesByPitch = useMemo(() => {
     const currentTimeStr = now.toTimeString().slice(0, 5);
+    const currentDateStr = now.toISOString().split('T')[0];
+    
     const live = matches.filter(m => {
       if (!m.start_time || m.status === 'completed' || !m.team1_id) return false;
+      
+      // If match has a date, it MUST match today
+      if (m.match_date && m.match_date !== currentDateStr) return false;
+      // If match has NO date, we assume it might be for today (fallback)
+      
       const matchTime = new Date(`2024-01-01T${m.start_time}:00`);
       const currentTime = new Date(`2024-01-01T${currentTimeStr}:00`);
       const diff = (currentTime.getTime() - matchTime.getTime()) / 60000;
-      return diff >= 0 && diff < 20;
+      // Match is "live" if it started within the last 30 minutes (increased from 20)
+      return diff >= 0 && diff < 30;
     });
 
     const map: Record<string, Match[]> = {};
@@ -666,19 +717,41 @@ function LiveDashboard({ matches }: { matches: Match[] }) {
 
   const upcomingMatches = useMemo(() => {
     const currentTimeStr = now.toTimeString().slice(0, 5);
+    const currentDateStr = now.toISOString().split('T')[0];
+
     return matches
       .filter(m => {
         if (!m.start_time || m.status === 'completed' || !m.team1_id) return false;
+        
+        // If date is in the future, it's upcoming
+        if (m.match_date && m.match_date > currentDateStr) return true;
+        // If date is in the past, it's not upcoming
+        if (m.match_date && m.match_date < currentDateStr) return false;
+        
+        // Same day, check time
         const matchTime = new Date(`2024-01-01T${m.start_time}:00`);
         const currentTime = new Date(`2024-01-01T${currentTimeStr}:00`);
         return matchTime.getTime() > currentTime.getTime();
       })
-      .sort((a, b) => (a.start_time || '').localeCompare(b.start_time || ''))
+      .sort((a, b) => (a.match_date || '').localeCompare(b.match_date || '') || (a.start_time || '').localeCompare(b.start_time || ''))
       .slice(0, 4);
   }, [matches, now]);
 
   return (
     <div className="space-y-8">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-3xl font-black text-stone-900 tracking-tight">Live Matches</h2>
+          <p className="text-stone-500 font-medium">Real-time updates from all pitches</p>
+        </div>
+        <div className="bg-white px-4 py-2 rounded-xl border border-stone-200 shadow-sm flex items-center gap-3">
+          <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+          <span className="text-sm font-bold text-stone-700">
+            {now.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} • {now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+          </span>
+        </div>
+      </div>
+
       {/* Pitch Status Grid */}
       <section className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
         <div className="bg-maroon-900 px-6 py-4 flex items-center justify-between">
@@ -688,7 +761,7 @@ function LiveDashboard({ matches }: { matches: Match[] }) {
           </h2>
           <span className="text-maroon-300 text-[10px] font-bold uppercase">Live Updates</span>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-x divide-y divide-stone-100">
+        <div className="grid grid-cols-1 sm:grid-cols-2 divide-x divide-y divide-stone-100">
           {pitches.map(pitch => {
             const pitchMatches = liveMatchesByPitch[pitch] || [];
             return (
@@ -998,20 +1071,24 @@ const AdminPanel: React.FC<{
   teams: Team[], 
   matches: Match[], 
   tournamentType: TournamentType,
-  standings: any[],
+  standings: Record<string, any[]>,
+  bestSecondPlace: any,
   submissions: Submission[],
   onRefresh: () => void
-}> = ({ teams, matches, tournamentType, standings, submissions, onRefresh }) => {
+}> = ({ teams, matches, tournamentType, standings, bestSecondPlace, submissions, onRefresh }) => {
   const [newTeamName, setNewTeamName] = useState('');
+  const [newTeamGroup, setNewTeamGroup] = useState('A');
   const [isResetting, setIsResetting] = useState(false);
   const [editingMatchId, setEditingMatchId] = useState<number | null>(null);
   const [editScore1, setEditScore1] = useState(0);
   const [editScore2, setEditScore2] = useState(0);
   const [editStatus, setEditStatus] = useState<'scheduled' | 'pending' | 'completed'>('scheduled');
+  const [editDate, setEditDate] = useState('');
   const [editStartTime, setEditStartTime] = useState('');
   const [editPitch, setEditPitch] = useState('');
   const [editUmpire, setEditUmpire] = useState('');
 
+  const [bulkDate, setBulkDate] = useState(new Date().toISOString().split('T')[0]);
   const [bulkStartTime, setBulkStartTime] = useState('10:00');
   const [bulkInterval, setBulkInterval] = useState(20);
   const [bulkPitch, setBulkPitch] = useState('1');
@@ -1019,11 +1096,13 @@ const AdminPanel: React.FC<{
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
 
+  const [autoDate, setAutoDate] = useState(new Date().toISOString().split('T')[0]);
   const [autoStartTime, setAutoStartTime] = useState('09:00');
   const [autoEndTime, setAutoEndTime] = useState('17:00');
   const [autoNumPitches, setAutoNumPitches] = useState(2);
 
   const [breakLabel, setBreakLabel] = useState('');
+  const [breakDate, setBreakDate] = useState(new Date().toISOString().split('T')[0]);
   const [breakTime, setBreakTime] = useState('');
   const [breakPitch, setBreakPitch] = useState('');
   const [matchSearch, setMatchSearch] = useState('');
@@ -1044,7 +1123,7 @@ const AdminPanel: React.FC<{
     await fetch('/api/teams', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newTeamName, tournament_type: tournamentType })
+      body: JSON.stringify({ name: newTeamName, tournament_type: tournamentType, group_name: newTeamGroup })
     });
     setNewTeamName('');
     onRefresh();
@@ -1058,20 +1137,24 @@ const AdminPanel: React.FC<{
   const generateSchedule = async () => {
     if (filteredTeams.length < 2) return;
     
-    // Simple Round Robin
-    for (let i = 0; i < filteredTeams.length; i++) {
-      for (let j = i + 1; j < filteredTeams.length; j++) {
-        await fetch('/api/matches', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            team1_id: filteredTeams[i].id,
-            team2_id: filteredTeams[j].id,
-            tournament_type: tournamentType,
-            start_time: 'TBD',
-            stage: 'round-robin'
-          })
-        });
+    // Group-based Round Robin
+    const groups = ['A', 'B', 'C'];
+    for (const g of groups) {
+      const groupTeams = filteredTeams.filter(t => t.group_name === g);
+      for (let i = 0; i < groupTeams.length; i++) {
+        for (let j = i + 1; j < groupTeams.length; j++) {
+          await fetch('/api/matches', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              team1_id: groupTeams[i].id,
+              team2_id: groupTeams[j].id,
+              tournament_type: tournamentType,
+              start_time: 'TBD',
+              stage: 'round-robin'
+            })
+          });
+        }
       }
     }
     onRefresh();
@@ -1116,6 +1199,7 @@ const AdminPanel: React.FC<{
           score1: isNaN(editScore1) ? 0 : editScore1, 
           score2: isNaN(editScore2) ? 0 : editScore2, 
           status: editStatus,
+          match_date: editDate,
           start_time: editStartTime,
           pitch: editPitch,
           umpire: editUmpire
@@ -1150,6 +1234,7 @@ const AdminPanel: React.FC<{
           score1: match.score1, 
           score2: match.score2, 
           status: match.status,
+          match_date: bulkDate,
           start_time: timeStr,
           pitch: match.pitch,
           umpire: match.umpire
@@ -1171,6 +1256,7 @@ const AdminPanel: React.FC<{
           score1: match.score1, 
           score2: match.score2, 
           status: match.status,
+          match_date: match.match_date,
           start_time: match.start_time,
           pitch: bulkPitch,
           umpire: match.umpire
@@ -1208,6 +1294,7 @@ const AdminPanel: React.FC<{
             score1: match.score1, 
             score2: match.score2, 
             status: match.status,
+            match_date: autoDate,
             start_time: timeStr,
             pitch: p.toString(),
             umpire: match.umpire
@@ -1226,6 +1313,7 @@ const AdminPanel: React.FC<{
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         tournament_type: tournamentType,
+        match_date: breakDate,
         start_time: breakTime,
         pitch: breakPitch,
         stage: breakLabel
@@ -1245,7 +1333,7 @@ const AdminPanel: React.FC<{
             <Plus className="w-5 h-5 text-maroon-700" />
             Manage Teams ({tournamentType})
           </h3>
-          <div className="flex gap-2 mb-6">
+          <div className="flex flex-col sm:flex-row gap-2 mb-6">
             <input 
               type="text" 
               placeholder="Team Name"
@@ -1253,17 +1341,31 @@ const AdminPanel: React.FC<{
               onChange={(e) => setNewTeamName(e.target.value)}
               className="flex-1 bg-stone-50 border border-stone-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
             />
-            <button 
-              onClick={addTeam}
-              className="bg-maroon-700 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-maroon-800 transition-all"
-            >
-              Add
-            </button>
+            <div className="flex gap-2">
+              <select 
+                value={newTeamGroup}
+                onChange={(e) => setNewTeamGroup(e.target.value)}
+                className="flex-1 sm:flex-none bg-stone-50 border border-stone-200 rounded-xl px-2 py-2 text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
+              >
+                <option value="A">Grp A</option>
+                <option value="B">Grp B</option>
+                <option value="C">Grp C</option>
+              </select>
+              <button 
+                onClick={addTeam}
+                className="flex-1 sm:flex-none bg-maroon-700 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-maroon-800 transition-all"
+              >
+                Add
+              </button>
+            </div>
           </div>
           <div className="space-y-2 max-h-64 overflow-y-auto pr-2">
             {filteredTeams.map(team => (
               <div key={team.id} className="flex justify-between items-center p-3 bg-stone-50 rounded-lg border border-stone-100">
-                <span className="font-medium text-sm text-stone-800">{team.name}</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-black bg-stone-200 text-stone-600 px-1.5 py-0.5 rounded">GRP {team.group_name}</span>
+                  <span className="font-medium text-sm text-stone-800">{team.name}</span>
+                </div>
                 {confirmDeleteId === team.id ? (
                   <div className="flex items-center gap-2 animate-in fade-in slide-in-from-right-2 duration-200">
                     <button 
@@ -1304,7 +1406,16 @@ const AdminPanel: React.FC<{
             Bulk Scheduler ({tournamentType})
           </h3>
           <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-500 uppercase">Date</label>
+                <input 
+                  type="date" 
+                  value={bulkDate}
+                  onChange={(e) => setBulkDate(e.target.value)}
+                  className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                />
+              </div>
               <div className="space-y-1">
                 <label className="text-[10px] font-bold text-stone-500 uppercase">Start Time</label>
                 <input 
@@ -1325,12 +1436,14 @@ const AdminPanel: React.FC<{
               </div>
               <div className="space-y-1">
                 <label className="text-[10px] font-bold text-stone-500 uppercase">Pitch</label>
-                <input 
-                  type="text" 
+                <select 
                   value={bulkPitch}
                   onChange={(e) => setBulkPitch(e.target.value)}
                   className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
-                />
+                >
+                  <option value="1">Pitch 1</option>
+                  <option value="2">Pitch 2</option>
+                </select>
               </div>
             </div>
             <div className="grid grid-cols-2 gap-4">
@@ -1361,7 +1474,16 @@ const AdminPanel: React.FC<{
             Auto-Schedule All Matches
           </h3>
           <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-500 uppercase">Date</label>
+                <input 
+                  type="date" 
+                  value={autoDate}
+                  onChange={(e) => setAutoDate(e.target.value)}
+                  className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                />
+              </div>
               <div className="space-y-1">
                 <label className="text-[10px] font-bold text-stone-500 uppercase">Start</label>
                 <input 
@@ -1382,13 +1504,14 @@ const AdminPanel: React.FC<{
               </div>
               <div className="space-y-1">
                 <label className="text-[10px] font-bold text-stone-500 uppercase">Pitches</label>
-                <input 
-                  type="number" 
-                  min="1"
+                <select 
                   value={autoNumPitches}
                   onChange={(e) => setAutoNumPitches(Number(e.target.value))}
                   className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
-                />
+                >
+                  <option value="1">1 Pitch</option>
+                  <option value="2">2 Pitches</option>
+                </select>
               </div>
             </div>
             <button 
@@ -1418,7 +1541,16 @@ const AdminPanel: React.FC<{
                 className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
               />
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-500 uppercase">Date</label>
+                <input 
+                  type="date" 
+                  value={breakDate}
+                  onChange={(e) => setBreakDate(e.target.value)}
+                  className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                />
+              </div>
               <div className="space-y-1">
                 <label className="text-[10px] font-bold text-stone-500 uppercase">Time</label>
                 <input 
@@ -1430,12 +1562,15 @@ const AdminPanel: React.FC<{
               </div>
               <div className="space-y-1">
                 <label className="text-[10px] font-bold text-stone-500 uppercase">Pitch (Optional)</label>
-                <input 
-                  type="text" 
+                <select 
                   value={breakPitch}
                   onChange={(e) => setBreakPitch(e.target.value)}
                   className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
-                />
+                >
+                  <option value="">None</option>
+                  <option value="1">Pitch 1</option>
+                  <option value="2">Pitch 2</option>
+                </select>
               </div>
             </div>
             <button 
@@ -1454,50 +1589,104 @@ const AdminPanel: React.FC<{
             <Calendar className="w-5 h-5 text-maroon-700" />
             Tournament Controls
           </h3>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <button 
               onClick={generateSchedule}
               disabled={filteredTeams.length < 2}
-              className="flex items-center justify-center gap-2 bg-maroon-700 text-white py-3 rounded-xl font-bold hover:bg-maroon-800 disabled:bg-stone-200 transition-all"
+              className="flex items-center justify-center gap-2 bg-maroon-700 text-white py-3 rounded-xl font-bold hover:bg-maroon-800 disabled:bg-stone-200 transition-all text-xs"
             >
               <RefreshCw className="w-4 h-4" />
               Generate Round Robin
             </button>
             
-            <button 
-              onClick={async () => {
-                const sortedTeams = standings.map(s => teams.find(t => t.name === s.name));
-                await fetch('/api/generate-knockouts', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ tournament_type: tournamentType, teams: sortedTeams })
-                });
-                onRefresh();
-              }}
-              disabled={standings.length < 2 || matches.filter(m => m.tournament_type === tournamentType && (m.stage === 'semi-final' || m.stage === 'play-off')).length > 0}
-              className="flex items-center justify-center gap-2 bg-maroon-600 text-white py-3 rounded-xl font-bold hover:bg-maroon-700 disabled:bg-stone-200 transition-all"
-            >
-              <Trophy className="w-4 h-4" />
-              Generate Knockouts
-            </button>
+            {tournamentType === 'competitive' ? (
+              <>
+                <button 
+                  onClick={async () => {
+                    // Overall standings for competitive
+                    const allTeams = (Object.values(standings).flat() as any[]).sort((a, b) => b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf);
+                    await fetch('/api/generate-knockouts', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ tournament_type: tournamentType, teams: allTeams })
+                    });
+                    onRefresh();
+                  }}
+                  disabled={Object.keys(standings).length === 0 || matches.filter(m => m.tournament_type === tournamentType && (m.stage === 'play-off-8v9' || m.stage === 'quarter-final')).length > 0}
+                  className="flex items-center justify-center gap-2 bg-maroon-600 text-white py-3 rounded-xl font-bold hover:bg-maroon-700 disabled:bg-stone-200 transition-all text-xs"
+                >
+                  <Trophy className="w-4 h-4" />
+                  Generate Quarters & 8v9
+                </button>
+
+                <button 
+                  onClick={async () => {
+                    const quarters = matches.filter(m => m.tournament_type === tournamentType && m.stage === 'quarter-final' && m.status === 'completed');
+                    if (quarters.length < 4) {
+                      alert("Complete all Quarter-Finals first!");
+                      return;
+                    }
+                    const winners = quarters.map(m => m.score1 > m.score2 ? { id: m.team1_id } : { id: m.team2_id });
+                    await fetch('/api/generate-next-stage', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ tournament_type: tournamentType, stage: 'semi-final', teams: winners })
+                    });
+                    onRefresh();
+                  }}
+                  disabled={matches.filter(m => m.tournament_type === tournamentType && m.stage === 'quarter-final' && m.status === 'completed').length < 4 || matches.filter(m => m.tournament_type === tournamentType && m.stage === 'semi-final').length > 0}
+                  className="flex items-center justify-center gap-2 bg-maroon-500 text-white py-3 rounded-xl font-bold hover:bg-maroon-600 disabled:bg-stone-200 transition-all text-xs"
+                >
+                  <Trophy className="w-4 h-4" />
+                  Generate Semis
+                </button>
+              </>
+            ) : (
+              <button 
+                onClick={async () => {
+                  // Chill: 3 winners + 1 best 2nd
+                  const winners = Object.values(standings).map(group => group[0]).filter(Boolean);
+                  if (winners.length < 3 || !bestSecondPlace) {
+                    alert("Group stages not complete or not enough teams!");
+                    return;
+                  }
+                  const knockoutTeams = [...winners, bestSecondPlace];
+                  await fetch('/api/generate-knockouts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tournament_type: tournamentType, teams: knockoutTeams })
+                  });
+                  onRefresh();
+                }}
+                disabled={Object.keys(standings).length < 3 || matches.filter(m => m.tournament_type === tournamentType && m.stage === 'semi-final').length > 0}
+                className="flex items-center justify-center gap-2 bg-maroon-600 text-white py-3 rounded-xl font-bold hover:bg-maroon-700 disabled:bg-stone-200 transition-all text-xs"
+              >
+                <Trophy className="w-4 h-4" />
+                Generate Semis (Winners + Best 2nd)
+              </button>
+            )}
 
             <button 
               onClick={async () => {
                 const semiFinals = matches.filter(m => m.tournament_type === tournamentType && m.stage === 'semi-final' && m.status === 'completed');
-                if (semiFinals.length < 2) return;
+                if (semiFinals.length < 2) {
+                  alert("Complete all Semi-Finals first!");
+                  return;
+                }
                 const winners = semiFinals.map(m => m.score1 > m.score2 ? { id: m.team1_id } : { id: m.team2_id });
-                await fetch('/api/generate-final', {
+                const losers = semiFinals.map(m => m.score1 > m.score2 ? { id: m.team2_id } : { id: m.team1_id });
+                await fetch('/api/generate-next-stage', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ tournament_type: tournamentType, winners })
+                  body: JSON.stringify({ tournament_type: tournamentType, stage: 'final', teams: [...winners, ...losers] })
                 });
                 onRefresh();
               }}
               disabled={matches.filter(m => m.tournament_type === tournamentType && m.stage === 'semi-final' && m.status === 'completed').length < 2 || matches.filter(m => m.tournament_type === tournamentType && m.stage === 'final').length > 0}
-              className="flex items-center justify-center gap-2 bg-maroon-900 text-white py-3 rounded-xl font-bold hover:bg-maroon-950 disabled:bg-stone-200 transition-all"
+              className="flex items-center justify-center gap-2 bg-maroon-900 text-white py-3 rounded-xl font-bold hover:bg-maroon-950 disabled:bg-stone-200 transition-all text-xs"
             >
               <Trophy className="w-4 h-4" />
-              Generate Final
+              Generate Final & 3rd/4th
             </button>
           </div>
           <div className="mt-6 pt-6 border-t border-stone-100 flex justify-end">
@@ -1552,7 +1741,7 @@ const AdminPanel: React.FC<{
           </div>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
+          <table className="w-full text-left border-collapse min-w-[800px]">
             <thead>
               <tr className="bg-stone-50 text-stone-500 text-xs font-bold uppercase tracking-wider">
                 <th className="px-6 py-3">Match Details</th>
@@ -1565,7 +1754,11 @@ const AdminPanel: React.FC<{
             </thead>
             <tbody className="divide-y divide-stone-100">
               {[...searchedMatches]
-                .sort((a, b) => (a.start_time || '').localeCompare(b.start_time || '') || a.tournament_type.localeCompare(b.tournament_type))
+                .sort((a, b) => 
+                  (a.match_date || '').localeCompare(b.match_date || '') || 
+                  (a.start_time || '').localeCompare(b.start_time || '') || 
+                  a.tournament_type.localeCompare(b.tournament_type)
+                )
                 .map(match => (
                 <tr key={match.id} className={cn(
                   "hover:bg-stone-50 transition-colors group",
@@ -1589,7 +1782,7 @@ const AdminPanel: React.FC<{
                     <div className="flex flex-col">
                       <div className="flex items-center gap-1.5 text-maroon-700 font-bold text-sm">
                         <Clock className="w-3 h-3" />
-                        {match.start_time || 'TBD'}
+                        {match.match_date ? `${match.match_date.slice(5)} ${match.start_time}` : match.start_time || 'TBD'}
                       </div>
                       <div className="flex items-center gap-1.5 text-stone-500 text-xs">
                         <MapPin className="w-3 h-3" />
@@ -1635,6 +1828,7 @@ const AdminPanel: React.FC<{
                         setEditScore1(match.score1);
                         setEditScore2(match.score2);
                         setEditStatus(match.status);
+                        setEditDate(match.match_date || '');
                         setEditStartTime(match.start_time || '');
                         setEditPitch(match.pitch || '');
                         setEditUmpire(match.umpire || '');
@@ -1668,7 +1862,7 @@ const AdminPanel: React.FC<{
           <motion.div 
             initial={{ scale: 0.95, opacity: 0, y: 20 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
-            className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden"
+            className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col"
           >
             <div className="bg-maroon-700 p-6 text-white flex justify-between items-center">
               <div>
@@ -1685,8 +1879,17 @@ const AdminPanel: React.FC<{
               </button>
             </div>
             
-            <div className="p-8 space-y-6">
+            <div className="p-8 space-y-6 overflow-y-auto">
               <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-stone-500 uppercase tracking-wider">Date</label>
+                  <input 
+                    type="date" 
+                    value={editDate}
+                    onChange={(e) => setEditDate(e.target.value)}
+                    className="w-full px-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
+                  />
+                </div>
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-stone-500 uppercase tracking-wider">Start Time</label>
                   <div className="relative">
@@ -1702,16 +1905,15 @@ const AdminPanel: React.FC<{
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-stone-500 uppercase tracking-wider">Pitch</label>
-                  <div className="relative">
-                    <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
-                    <input 
-                      type="text" 
-                      value={editPitch}
-                      onChange={(e) => setEditPitch(e.target.value)}
-                      placeholder="Pitch #"
-                      className="w-full pl-10 pr-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
-                    />
-                  </div>
+                  <select 
+                    value={editPitch}
+                    onChange={(e) => setEditPitch(e.target.value)}
+                    className="w-full px-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
+                  >
+                    <option value="">TBD</option>
+                    <option value="1">Pitch 1</option>
+                    <option value="2">Pitch 2</option>
+                  </select>
                 </div>
               </div>
 

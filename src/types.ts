@@ -4,6 +4,7 @@ export interface Team {
   id: number;
   name: string;
   tournament_type: TournamentType;
+  group_name?: string;
 }
 
 export interface Match {
@@ -16,10 +17,11 @@ export interface Match {
   score2: number;
   status: 'scheduled' | 'pending' | 'completed';
   tournament_type: TournamentType;
+  match_date?: string;
   start_time: string;
   pitch?: string;
   umpire?: string;
-  stage: 'round-robin' | 'semi-final' | 'final' | 'play-off';
+  stage: string; // Using string to allow flexible stages like 'play-off-8v9', 'quarter-final', etc.
 }
 
 export interface Goal {

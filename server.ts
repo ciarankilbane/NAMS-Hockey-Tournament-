@@ -16,7 +16,8 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS teams (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    tournament_type TEXT NOT NULL CHECK (tournament_type IN ('chill', 'competitive'))
+    tournament_type TEXT NOT NULL CHECK (tournament_type IN ('chill', 'competitive')),
+    group_name TEXT -- e.g., 'A', 'B', 'C'
   );
 
   CREATE TABLE IF NOT EXISTS matches (
@@ -27,6 +28,7 @@ db.exec(`
     score2 INTEGER DEFAULT 0,
     status TEXT DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'pending', 'completed')),
     tournament_type TEXT NOT NULL,
+    match_date TEXT, -- e.g., '2026-03-03'
     start_time TEXT,
     pitch TEXT,
     umpire TEXT,
@@ -57,6 +59,16 @@ db.exec(`
     UNIQUE(match_id, team_id)
   );
 `);
+
+// Migration: Ensure group_name column exists
+try {
+  db.prepare("ALTER TABLE teams ADD COLUMN group_name TEXT").run();
+} catch (e) {}
+
+// Migration: Ensure match_date column exists
+try {
+  db.prepare("ALTER TABLE matches ADD COLUMN match_date TEXT").run();
+} catch (e) {}
 
 // Migration: Ensure umpire column exists
 try {
@@ -92,15 +104,15 @@ async function startServer() {
   });
 
   app.post("/api/teams", (req, res) => {
-    const { name, tournament_type } = req.body;
-    const info = db.prepare("INSERT INTO teams (name, tournament_type) VALUES (?, ?)").run(name, tournament_type);
-    const newTeam = { id: info.lastInsertRowid, name, tournament_type };
+    const { name, tournament_type, group_name } = req.body;
+    const info = db.prepare("INSERT INTO teams (name, tournament_type, group_name) VALUES (?, ?, ?)").run(name, tournament_type, group_name);
+    const newTeam = { id: info.lastInsertRowid, name, tournament_type, group_name };
     io.emit("team_added", newTeam);
     res.json(newTeam);
   });
 
   app.post("/api/matches", (req, res) => {
-    const { team1_id, team2_id, tournament_type, start_time, stage } = req.body;
+    const { team1_id, team2_id, tournament_type, match_date, start_time, stage } = req.body;
     
     // Prevent duplicate matches in the same stage
     const existing = db.prepare(`
@@ -119,7 +131,7 @@ async function startServer() {
       `).get(existing.id));
     }
 
-    const info = db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, start_time, stage) VALUES (?, ?, ?, ?, ?)").run(team1_id, team2_id, tournament_type, start_time, stage);
+    const info = db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, match_date, start_time, stage) VALUES (?, ?, ?, ?, ?, ?)").run(team1_id, team2_id, tournament_type, match_date, start_time, stage);
     const newMatch = db.prepare(`
       SELECT m.*, t1.name as team1_name, t2.name as team2_name 
       FROM matches m
@@ -184,23 +196,32 @@ async function startServer() {
 
   app.post("/api/generate-knockouts", (req, res) => {
     const { tournament_type, teams } = req.body;
-    // teams should be sorted by standings
-    if (teams.length < 2) return res.status(400).json({ error: "Need at least 2 teams" });
+    // teams should be sorted by overall standings if needed, 
+    // but for groups we might need specific logic.
+    if (teams.length < 2) return res.status(400).json({ error: "Need more teams" });
 
-    // Semi 1: 1st vs 4th (if 4+ teams)
-    if (teams.length >= 4) {
-      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[0].id, teams[3].id, tournament_type, 'semi-final');
-      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[1].id, teams[2].id, tournament_type, 'semi-final');
-      
-      // Play-offs for the rest
-      for (let i = 4; i < teams.length; i += 2) {
-        if (teams[i+1]) {
-          db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[i].id, teams[i+1].id, tournament_type, 'play-off');
-        }
+    if (tournament_type === 'competitive') {
+      // 9 teams total. 
+      // 8v9 Play-off
+      if (teams.length >= 9) {
+        db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[7].id, teams[8].id, tournament_type, 'play-off-8v9');
       }
-    } else if (teams.length >= 2) {
-      // Just a final if only 2-3 teams? Or just semi between 1 and 2
-      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[0].id, teams[1].id, tournament_type, 'final');
+      
+      // Quarter-finals (Top 7 + Winner of 8v9)
+      // We can't fully automate the winner part yet, so we just create the placeholders or the first 3 quarters
+      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[0].id, null, tournament_type, 'quarter-final'); // 1st vs Winner 8v9 (placeholder)
+      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[1].id, teams[6].id, tournament_type, 'quarter-final'); // 2nd vs 7th
+      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[2].id, teams[5].id, tournament_type, 'quarter-final'); // 3rd vs 6th
+      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[3].id, teams[4].id, tournament_type, 'quarter-final'); // 4th vs 5th
+
+    } else if (tournament_type === 'chill') {
+      // 13 teams total. 
+      // Semi-finals: Group 1 winner, Group 2 winner, Group 3 winner, Best 2nd place.
+      // The frontend should have calculated these 4 teams.
+      if (teams.length >= 4) {
+        db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[0].id, teams[3].id, tournament_type, 'semi-final');
+        db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[1].id, teams[2].id, tournament_type, 'semi-final');
+      }
     }
 
     const newMatches = db.prepare(`
@@ -208,8 +229,39 @@ async function startServer() {
       FROM matches m 
       LEFT JOIN teams t1 ON m.team1_id = t1.id 
       LEFT JOIN teams t2 ON m.team2_id = t2.id 
-      WHERE m.tournament_type = ? AND (m.stage = 'semi-final' OR m.stage = 'play-off')
+      WHERE m.tournament_type = ? AND (m.stage LIKE '%final%' OR m.stage LIKE '%play-off%')
+      AND m.status = 'scheduled'
     `).all(tournament_type);
+    
+    newMatches.forEach(m => io.emit("match_added", m));
+    res.json(newMatches);
+  });
+
+  app.post("/api/generate-next-stage", (req, res) => {
+    const { tournament_type, stage, teams } = req.body;
+    // Generic next stage generator
+    // e.g., Semi-finals from Quarters, or Final from Semis
+    if (teams.length < 2) return res.status(400).json({ error: "Need at least 2 teams" });
+
+    const matchCount = Math.floor(teams.length / 2);
+    for (let i = 0; i < matchCount; i++) {
+      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[i*2].id, teams[i*2+1].id, tournament_type, stage);
+    }
+
+    // Handle 3rd/4th play-off if stage is 'final'
+    if (stage === 'final' && teams.length >= 4) {
+       // Assuming teams[2] and teams[3] are losers of semis passed by frontend
+       db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[2].id, teams[3].id, tournament_type, '3rd-4th-play-off');
+    }
+
+    const newMatches = db.prepare(`
+      SELECT m.*, t1.name as team1_name, t2.name as team2_name 
+      FROM matches m 
+      LEFT JOIN teams t1 ON m.team1_id = t1.id 
+      LEFT JOIN teams t2 ON m.team2_id = t2.id 
+      WHERE m.tournament_type = ? AND m.stage = ?
+      AND m.status = 'scheduled'
+    `).all(tournament_type, stage);
     
     newMatches.forEach(m => io.emit("match_added", m));
     res.json(newMatches);
@@ -281,8 +333,8 @@ async function startServer() {
   });
 
   app.post("/api/admin/update-match", (req, res) => {
-    const { match_id, score1, score2, status, start_time, pitch, umpire } = req.body;
-    console.log(`Updating match ${match_id}:`, { score1, score2, status, start_time, pitch, umpire });
+    const { match_id, score1, score2, status, match_date, start_time, pitch, umpire } = req.body;
+    console.log(`Updating match ${match_id}:`, { score1, score2, status, match_date, start_time, pitch, umpire });
     try {
       const current = db.prepare("SELECT * FROM matches WHERE id = ?").get(match_id);
       if (!current) {
@@ -292,12 +344,13 @@ async function startServer() {
 
       const result = db.prepare(`
         UPDATE matches 
-        SET score1 = ?, score2 = ?, status = ?, start_time = ?, pitch = ?, umpire = ? 
+        SET score1 = ?, score2 = ?, status = ?, match_date = ?, start_time = ?, pitch = ?, umpire = ? 
         WHERE id = ?
       `).run(
         score1 !== undefined ? score1 : current.score1,
         score2 !== undefined ? score2 : current.score2,
         status !== undefined ? status : current.status,
+        match_date !== undefined ? match_date : current.match_date,
         start_time !== undefined ? start_time : current.start_time,
         pitch !== undefined ? pitch : current.pitch,
         umpire !== undefined ? umpire : current.umpire,
@@ -324,9 +377,9 @@ async function startServer() {
   });
 
   app.post("/api/admin/add-break", (req, res) => {
-    const { tournament_type, start_time, pitch, stage } = req.body;
+    const { tournament_type, match_date, start_time, pitch, stage } = req.body;
     try {
-      const info = db.prepare("INSERT INTO matches (tournament_type, start_time, pitch, stage, status) VALUES (?, ?, ?, ?, 'completed')").run(tournament_type, start_time, pitch, stage);
+      const info = db.prepare("INSERT INTO matches (tournament_type, match_date, start_time, pitch, stage, status) VALUES (?, ?, ?, ?, ?, 'completed')").run(tournament_type, match_date, start_time, pitch, stage);
       const newMatch = db.prepare(`
         SELECT m.*, NULL as team1_name, NULL as team2_name 
         FROM matches m
