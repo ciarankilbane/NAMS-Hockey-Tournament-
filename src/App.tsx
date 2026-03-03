@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { socket } from './lib/socket';
+import { storage } from './lib/storage';
 import type { Team, Match, Submission, AppData, TournamentType, Goal } from './types';
 
 function cn(...inputs: ClassValue[]) {
@@ -23,6 +24,7 @@ export default function App() {
   const [captainAuthError, setCaptainAuthError] = useState(false);
   const [umpireName, setUmpireName] = useState('');
   const [isUmpireAuthenticated, setIsUmpireAuthenticated] = useState(false);
+  const [isLocalMode, setIsLocalMode] = useState(false);
 
   useEffect(() => {
     fetchData();
@@ -66,10 +68,14 @@ export default function App() {
     setLoading(true);
     try {
       const res = await fetch('/api/data');
+      if (!res.ok) throw new Error('API not available');
       const json = await res.json();
       setData(json);
+      setIsLocalMode(false);
     } catch (err) {
-      console.error('Failed to fetch data:', err);
+      console.warn('Backend server not found. Switching to Local Storage mode (GitHub Pages).');
+      setIsLocalMode(true);
+      setData(storage.getData());
     } finally {
       setLoading(false);
     }
@@ -155,6 +161,11 @@ export default function App() {
     <div className="min-h-screen bg-stone-50 text-stone-900 font-sans">
       {/* Header */}
       <header className="bg-black border-b border-maroon-900 sticky top-0 z-30">
+        {isLocalMode && (
+          <div className="bg-amber-500 text-black text-[10px] font-black uppercase tracking-widest py-1 px-4 text-center">
+            Local Storage Mode: Data is saved only on this device. Use Render.com for a shared tournament app.
+          </div>
+        )}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16">
             <div className="flex items-center gap-3">
@@ -495,7 +506,7 @@ export default function App() {
                   </div>
                 </div>
               ) : (
-                <ScoreReporter teams={data.teams} matches={data.matches} />
+                <ScoreReporter teams={data.teams} matches={data.matches} isLocalMode={isLocalMode} onRefresh={fetchData} />
               )}
             </motion.div>
           )}
@@ -552,6 +563,7 @@ export default function App() {
                   bestSecondPlace={bestSecondPlace}
                   submissions={data.submissions}
                   onRefresh={fetchData}
+                  isLocalMode={isLocalMode}
                 />
               )}
             </motion.div>
@@ -875,7 +887,7 @@ function TopScorers({ goals }: { goals: Goal[] }) {
   );
 }
 
-const ScoreReporter: React.FC<{ teams: Team[], matches: Match[] }> = ({ teams, matches }) => {
+const ScoreReporter: React.FC<{ teams: Team[], matches: Match[], isLocalMode: boolean, onRefresh: () => void }> = ({ teams, matches, isLocalMode, onRefresh }) => {
   const [selectedMatchId, setSelectedMatchId] = useState<string>('');
   const [selectedTeamId, setSelectedTeamId] = useState<string>('');
   const [score1, setScore1] = useState<number>(0);
@@ -910,28 +922,37 @@ const ScoreReporter: React.FC<{ teams: Team[], matches: Match[] }> = ({ teams, m
     setMessage(null);
 
     try {
-      const res = await fetch('/api/submit-score', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      if (isLocalMode) {
+        storage.submitScore({
           match_id: Number(selectedMatchId),
           team_id: Number(selectedTeamId),
           score1,
           score2,
           scorers: scorers.filter(s => s.trim() !== '')
-        })
-      });
-
-      if (res.ok) {
-        setMessage({ type: 'success', text: 'Score submitted! Waiting for other team to confirm.' });
-        setSelectedMatchId('');
-        setSelectedTeamId('');
-        setScore1(0);
-        setScore2(0);
-        setScorers([]);
+        });
+        onRefresh();
       } else {
-        throw new Error('Submission failed');
+        const res = await fetch('/api/submit-score', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            match_id: Number(selectedMatchId),
+            team_id: Number(selectedTeamId),
+            score1,
+            score2,
+            scorers: scorers.filter(s => s.trim() !== '')
+          })
+        });
+
+        if (!res.ok) throw new Error('Submission failed');
       }
+
+      setMessage({ type: 'success', text: 'Score submitted! Waiting for other team to confirm.' });
+      setSelectedMatchId('');
+      setSelectedTeamId('');
+      setScore1(0);
+      setScore2(0);
+      setScorers([]);
     } catch (err) {
       setMessage({ type: 'error', text: 'Failed to submit score. Please try again.' });
     } finally {
@@ -1074,8 +1095,9 @@ const AdminPanel: React.FC<{
   standings: Record<string, any[]>,
   bestSecondPlace: any,
   submissions: Submission[],
-  onRefresh: () => void
-}> = ({ teams, matches, tournamentType, standings, bestSecondPlace, submissions, onRefresh }) => {
+  onRefresh: () => void,
+  isLocalMode: boolean
+}> = ({ teams, matches, tournamentType, standings, bestSecondPlace, submissions, onRefresh, isLocalMode }) => {
   const [newTeamName, setNewTeamName] = useState('');
   const [newTeamGroup, setNewTeamGroup] = useState('A');
   const [isResetting, setIsResetting] = useState(false);
@@ -1120,17 +1142,25 @@ const AdminPanel: React.FC<{
 
   const addTeam = async () => {
     if (!newTeamName) return;
-    await fetch('/api/teams', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newTeamName, tournament_type: tournamentType, group_name: newTeamGroup })
-    });
+    if (isLocalMode) {
+      storage.addTeam({ name: newTeamName, tournament_type: tournamentType, group_name: newTeamGroup });
+    } else {
+      await fetch('/api/teams', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newTeamName, tournament_type: tournamentType, group_name: newTeamGroup })
+      });
+    }
     setNewTeamName('');
     onRefresh();
   };
 
   const removeTeam = async (id: number) => {
-    await fetch(`/api/teams/${id}`, { method: 'DELETE' });
+    if (isLocalMode) {
+      storage.deleteTeam(id);
+    } else {
+      await fetch(`/api/teams/${id}`, { method: 'DELETE' });
+    }
     onRefresh();
   };
 
@@ -1143,17 +1173,29 @@ const AdminPanel: React.FC<{
       const groupTeams = filteredTeams.filter(t => t.group_name === g);
       for (let i = 0; i < groupTeams.length; i++) {
         for (let j = i + 1; j < groupTeams.length; j++) {
-          await fetch('/api/matches', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+          if (isLocalMode) {
+            storage.addMatch({
               team1_id: groupTeams[i].id,
               team2_id: groupTeams[j].id,
               tournament_type: tournamentType,
               start_time: 'TBD',
-              stage: 'round-robin'
-            })
-          });
+              stage: 'round-robin',
+              team1_name: groupTeams[i].name,
+              team2_name: groupTeams[j].name
+            });
+          } else {
+            await fetch('/api/matches', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                team1_id: groupTeams[i].id,
+                team2_id: groupTeams[j].id,
+                tournament_type: tournamentType,
+                start_time: 'TBD',
+                stage: 'round-robin'
+              })
+            });
+          }
         }
       }
     }
@@ -1161,19 +1203,59 @@ const AdminPanel: React.FC<{
   };
 
   const forceApprove = async (submissionId: number) => {
-    await fetch('/api/admin/force-approve', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ submission_id: submissionId })
-    });
+    if (isLocalMode) {
+      const sub = submissions.find(s => s.id === submissionId);
+      if (sub) {
+        storage.updateMatch(sub.match_id, { score1: sub.score1, score2: sub.score2, status: 'completed' });
+      }
+    } else {
+      await fetch('/api/admin/force-approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ submission_id: submissionId })
+      });
+    }
     onRefresh();
   };
 
   const resetData = async () => {
+    if (!confirm('Are you sure you want to reset ALL data? This cannot be undone.')) return;
     setIsResetting(true);
-    await fetch('/api/reset', { method: 'POST' });
+    if (isLocalMode) {
+      storage.reset();
+    } else {
+      await fetch('/api/reset', { method: 'POST' });
+    }
     setIsResetting(false);
     onRefresh();
+  };
+
+  const exportData = () => {
+    const data = storage.getData();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `tournament-data-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importData = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const json = JSON.parse(event.target?.result as string);
+        storage.saveData(json);
+        onRefresh();
+        alert('Data imported successfully!');
+      } catch (err) {
+        alert('Failed to import data. Invalid file format.');
+      }
+    };
+    reader.readAsText(file);
   };
 
   const [isSavingMatch, setIsSavingMatch] = useState<number | null>(null);
@@ -1191,11 +1273,8 @@ const AdminPanel: React.FC<{
     });
     setIsSavingMatch(matchId);
     try {
-      const res = await fetch('/api/admin/update-match', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          match_id: matchId, 
+      if (isLocalMode) {
+        storage.updateMatch(matchId, {
           score1: isNaN(editScore1) ? 0 : editScore1, 
           score2: isNaN(editScore2) ? 0 : editScore2, 
           status: editStatus,
@@ -1203,11 +1282,26 @@ const AdminPanel: React.FC<{
           start_time: editStartTime,
           pitch: editPitch,
           umpire: editUmpire
-        })
-      });
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to update match');
+        });
+      } else {
+        const res = await fetch('/api/admin/update-match', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            match_id: matchId, 
+            score1: isNaN(editScore1) ? 0 : editScore1, 
+            score2: isNaN(editScore2) ? 0 : editScore2, 
+            status: editStatus,
+            match_date: editDate,
+            start_time: editStartTime,
+            pitch: editPitch,
+            umpire: editUmpire
+          })
+        });
+        if (!res.ok) {
+          const errorData = await res.json();
+          throw new Error(errorData.error || 'Failed to update match');
+        }
       }
       setEditingMatchId(null);
       onRefresh();
@@ -1226,20 +1320,27 @@ const AdminPanel: React.FC<{
     
     for (const match of filteredMatches) {
       const timeStr = currentTime.toTimeString().slice(0, 5);
-      await fetch('/api/admin/update-match', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          match_id: match.id, 
-          score1: match.score1, 
-          score2: match.score2, 
-          status: match.status,
+      if (isLocalMode) {
+        storage.updateMatch(match.id, {
           match_date: bulkDate,
-          start_time: timeStr,
-          pitch: match.pitch,
-          umpire: match.umpire
-        })
-      });
+          start_time: timeStr
+        });
+      } else {
+        await fetch('/api/admin/update-match', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            match_id: match.id, 
+            score1: match.score1, 
+            score2: match.score2, 
+            status: match.status,
+            match_date: bulkDate,
+            start_time: timeStr,
+            pitch: match.pitch,
+            umpire: match.umpire
+          })
+        });
+      }
       currentTime = new Date(currentTime.getTime() + bulkInterval * 60000);
     }
     onRefresh();
@@ -1248,20 +1349,24 @@ const AdminPanel: React.FC<{
   const bulkAssignPitches = async () => {
     if (filteredMatches.length === 0) return;
     for (const match of filteredMatches) {
-      await fetch('/api/admin/update-match', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          match_id: match.id, 
-          score1: match.score1, 
-          score2: match.score2, 
-          status: match.status,
-          match_date: match.match_date,
-          start_time: match.start_time,
-          pitch: bulkPitch,
-          umpire: match.umpire
-        })
-      });
+      if (isLocalMode) {
+        storage.updateMatch(match.id, { pitch: bulkPitch });
+      } else {
+        await fetch('/api/admin/update-match', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            match_id: match.id, 
+            score1: match.score1, 
+            score2: match.score2, 
+            status: match.status,
+            match_date: match.match_date,
+            start_time: match.start_time,
+            pitch: bulkPitch,
+            umpire: match.umpire
+          })
+        });
+      }
     }
     onRefresh();
   };
@@ -1286,20 +1391,28 @@ const AdminPanel: React.FC<{
         if (currentMatchIdx >= allMatches.length) break;
         
         const match = allMatches[currentMatchIdx];
-        await fetch('/api/admin/update-match', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            match_id: match.id, 
-            score1: match.score1, 
-            score2: match.score2, 
-            status: match.status,
+        if (isLocalMode) {
+          storage.updateMatch(match.id, {
             match_date: autoDate,
             start_time: timeStr,
-            pitch: p.toString(),
-            umpire: match.umpire
-          })
-        });
+            pitch: p.toString()
+          });
+        } else {
+          await fetch('/api/admin/update-match', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              match_id: match.id, 
+              score1: match.score1, 
+              score2: match.score2, 
+              status: match.status,
+              match_date: autoDate,
+              start_time: timeStr,
+              pitch: p.toString(),
+              umpire: match.umpire
+            })
+          });
+        }
         currentMatchIdx++;
       }
     }
@@ -1308,17 +1421,33 @@ const AdminPanel: React.FC<{
 
   const addBreak = async () => {
     if (!breakLabel || !breakTime) return;
-    await fetch('/api/admin/add-break', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    if (isLocalMode) {
+      storage.addMatch({
         tournament_type: tournamentType,
         match_date: breakDate,
         start_time: breakTime,
         pitch: breakPitch,
-        stage: breakLabel
-      })
-    });
+        stage: breakLabel,
+        team1_id: 0,
+        team2_id: 0
+      });
+      // Update status to completed for breaks
+      const data = storage.getData();
+      const lastMatch = data.matches[data.matches.length - 1];
+      storage.updateMatch(lastMatch.id, { status: 'completed' });
+    } else {
+      await fetch('/api/admin/add-break', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tournament_type: tournamentType,
+          match_date: breakDate,
+          start_time: breakTime,
+          pitch: breakPitch,
+          stage: breakLabel
+        })
+      });
+    }
     setBreakLabel('');
     setBreakTime('');
     setBreakPitch('');
@@ -1605,11 +1734,24 @@ const AdminPanel: React.FC<{
                   onClick={async () => {
                     // Overall standings for competitive
                     const allTeams = (Object.values(standings).flat() as any[]).sort((a, b) => b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf);
-                    await fetch('/api/generate-knockouts', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ tournament_type: tournamentType, teams: allTeams })
-                    });
+                    
+                    if (isLocalMode) {
+                      const newMatches: any[] = [];
+                      if (allTeams.length >= 9) {
+                        newMatches.push({ team1_id: allTeams[7].id, team2_id: allTeams[8].id, tournament_type: tournamentType, stage: 'play-off-8v9', team1_name: allTeams[7].name, team2_name: allTeams[8].name });
+                      }
+                      newMatches.push({ team1_id: allTeams[0].id, team2_id: 0, tournament_type: tournamentType, stage: 'quarter-final', team1_name: allTeams[0].name, team2_name: 'Winner 8v9' });
+                      newMatches.push({ team1_id: allTeams[1].id, team2_id: allTeams[6].id, tournament_type: tournamentType, stage: 'quarter-final', team1_name: allTeams[1].name, team2_name: allTeams[6].name });
+                      newMatches.push({ team1_id: allTeams[2].id, team2_id: allTeams[5].id, tournament_type: tournamentType, stage: 'quarter-final', team1_name: allTeams[2].name, team2_name: allTeams[5].name });
+                      newMatches.push({ team1_id: allTeams[3].id, team2_id: allTeams[4].id, tournament_type: tournamentType, stage: 'quarter-final', team1_name: allTeams[3].name, team2_name: allTeams[4].name });
+                      storage.addMatches(newMatches);
+                    } else {
+                      await fetch('/api/generate-knockouts', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ tournament_type: tournamentType, teams: allTeams })
+                      });
+                    }
                     onRefresh();
                   }}
                   disabled={Object.keys(standings).length === 0 || matches.filter(m => m.tournament_type === tournamentType && (m.stage === 'play-off-8v9' || m.stage === 'quarter-final')).length > 0}
@@ -1626,12 +1768,21 @@ const AdminPanel: React.FC<{
                       alert("Complete all Quarter-Finals first!");
                       return;
                     }
-                    const winners = quarters.map(m => m.score1 > m.score2 ? { id: m.team1_id } : { id: m.team2_id });
-                    await fetch('/api/generate-next-stage', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ tournament_type: tournamentType, stage: 'semi-final', teams: winners })
-                    });
+                    const winners = quarters.map(m => m.score1 > m.score2 ? { id: m.team1_id, name: m.team1_name } : { id: m.team2_id, name: m.team2_name });
+                    
+                    if (isLocalMode) {
+                      const newMatches = [
+                        { team1_id: winners[0].id, team2_id: winners[3].id, tournament_type: tournamentType, stage: 'semi-final', team1_name: winners[0].name, team2_name: winners[3].name },
+                        { team1_id: winners[1].id, team2_id: winners[2].id, tournament_type: tournamentType, stage: 'semi-final', team1_name: winners[1].name, team2_name: winners[2].name }
+                      ];
+                      storage.addMatches(newMatches as any);
+                    } else {
+                      await fetch('/api/generate-next-stage', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ tournament_type: tournamentType, stage: 'semi-final', teams: winners })
+                      });
+                    }
                     onRefresh();
                   }}
                   disabled={matches.filter(m => m.tournament_type === tournamentType && m.stage === 'quarter-final' && m.status === 'completed').length < 4 || matches.filter(m => m.tournament_type === tournamentType && m.stage === 'semi-final').length > 0}
@@ -1651,11 +1802,20 @@ const AdminPanel: React.FC<{
                     return;
                   }
                   const knockoutTeams = [...winners, bestSecondPlace];
-                  await fetch('/api/generate-knockouts', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ tournament_type: tournamentType, teams: knockoutTeams })
-                  });
+                  
+                  if (isLocalMode) {
+                    const newMatches = [
+                      { team1_id: knockoutTeams[0].id, team2_id: knockoutTeams[3].id, tournament_type: tournamentType, stage: 'semi-final', team1_name: knockoutTeams[0].name, team2_name: knockoutTeams[3].name },
+                      { team1_id: knockoutTeams[1].id, team2_id: knockoutTeams[2].id, tournament_type: tournamentType, stage: 'semi-final', team1_name: knockoutTeams[1].name, team2_name: knockoutTeams[2].name }
+                    ];
+                    storage.addMatches(newMatches as any);
+                  } else {
+                    await fetch('/api/generate-knockouts', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ tournament_type: tournamentType, teams: knockoutTeams })
+                    });
+                  }
                   onRefresh();
                 }}
                 disabled={Object.keys(standings).length < 3 || matches.filter(m => m.tournament_type === tournamentType && m.stage === 'semi-final').length > 0}
@@ -1673,13 +1833,22 @@ const AdminPanel: React.FC<{
                   alert("Complete all Semi-Finals first!");
                   return;
                 }
-                const winners = semiFinals.map(m => m.score1 > m.score2 ? { id: m.team1_id } : { id: m.team2_id });
-                const losers = semiFinals.map(m => m.score1 > m.score2 ? { id: m.team2_id } : { id: m.team1_id });
-                await fetch('/api/generate-next-stage', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ tournament_type: tournamentType, stage: 'final', teams: [...winners, ...losers] })
-                });
+                const winners = semiFinals.map(m => m.score1 > m.score2 ? { id: m.team1_id, name: m.team1_name } : { id: m.team2_id, name: m.team2_name });
+                const losers = semiFinals.map(m => m.score1 > m.score2 ? { id: m.team2_id, name: m.team2_name } : { id: m.team1_id, name: m.team1_name });
+                
+                if (isLocalMode) {
+                  const newMatches = [
+                    { team1_id: winners[0].id, team2_id: winners[1].id, tournament_type: tournamentType, stage: 'final', team1_name: winners[0].name, team2_name: winners[1].name },
+                    { team1_id: losers[0].id, team2_id: losers[1].id, tournament_type: tournamentType, stage: '3rd-4th-play-off', team1_name: losers[0].name, team2_name: losers[1].name }
+                  ];
+                  storage.addMatches(newMatches as any);
+                } else {
+                  await fetch('/api/generate-next-stage', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tournament_type: tournamentType, stage: 'final', teams: [...winners, ...losers] })
+                  });
+                }
                 onRefresh();
               }}
               disabled={matches.filter(m => m.tournament_type === tournamentType && m.stage === 'semi-final' && m.status === 'completed').length < 2 || matches.filter(m => m.tournament_type === tournamentType && m.stage === 'final').length > 0}
@@ -1689,7 +1858,26 @@ const AdminPanel: React.FC<{
               Generate Final & 3rd/4th
             </button>
           </div>
-          <div className="mt-6 pt-6 border-t border-stone-100 flex justify-end">
+          <div className="mt-6 pt-6 border-t border-stone-100 flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-2">
+              {isLocalMode && (
+                <>
+                  <button 
+                    onClick={exportData}
+                    className="flex items-center gap-2 bg-stone-100 text-stone-600 px-4 py-2 rounded-xl font-bold text-xs hover:bg-stone-200 transition-all"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    Export Data
+                  </button>
+                  <label className="flex items-center gap-2 bg-stone-100 text-stone-600 px-4 py-2 rounded-xl font-bold text-xs hover:bg-stone-200 transition-all cursor-pointer">
+                    <Plus className="w-3 h-3" />
+                    Import Data
+                    <input type="file" accept=".json" onChange={importData} className="hidden" />
+                  </label>
+                </>
+              )}
+            </div>
+            
             {showResetConfirm ? (
               <div className="flex items-center gap-3 animate-in fade-in zoom-in-95 duration-200">
                 <span className="text-xs font-bold text-red-600 uppercase tracking-tight">Reset everything?</span>
