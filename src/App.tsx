@@ -25,9 +25,25 @@ export default function App() {
   const [umpireName, setUmpireName] = useState('');
   const [isUmpireAuthenticated, setIsUmpireAuthenticated] = useState(false);
   const [isLocalMode, setIsLocalMode] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
 
   useEffect(() => {
     fetchData();
+
+    socket.on('connect', () => {
+      console.log('Connected to server');
+      setIsConnecting(false);
+      setIsLocalMode(false);
+    });
+
+    socket.on('disconnect', () => {
+      console.log('Disconnected from server');
+    });
+
+    socket.on('connect_error', () => {
+      console.warn('Socket connection error');
+      setIsConnecting(false);
+    });
 
     socket.on('team_added', (newTeam: Team) => {
       setData(prev => ({ ...prev, teams: [...prev.teams, newTeam] }));
@@ -66,6 +82,7 @@ export default function App() {
 
   const fetchData = async () => {
     setLoading(true);
+    setIsConnecting(true);
     try {
       const res = await fetch('/api/data');
       if (!res.ok) throw new Error('API not available');
@@ -73,11 +90,12 @@ export default function App() {
       setData(json);
       setIsLocalMode(false);
     } catch (err) {
-      console.warn('Backend server not found. Switching to Local Storage mode (GitHub Pages).');
+      console.warn('Backend server not found or sleeping. Checking local storage.');
       setIsLocalMode(true);
       setData(storage.getData());
     } finally {
       setLoading(false);
+      setIsConnecting(false);
     }
   };
 
@@ -173,7 +191,20 @@ export default function App() {
                 <Trophy className="w-6 h-6 text-white" />
               </div>
               <div>
-                <h1 className="text-lg font-bold tracking-tight text-white">NAMS Hockey Tournament</h1>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-lg font-bold tracking-tight text-white">NAMS Hockey Tournament</h1>
+                  {isConnecting ? (
+                    <div className="flex items-center gap-1.5 px-2 py-0.5 bg-maroon-900/50 rounded-full border border-maroon-700/50">
+                      <RefreshCw className="w-2.5 h-2.5 text-maroon-400 animate-spin" />
+                      <span className="text-[10px] font-bold text-maroon-400 uppercase tracking-tighter">Waking up...</span>
+                    </div>
+                  ) : !isLocalMode ? (
+                    <div className="flex items-center gap-1 px-2 py-0.5 bg-emerald-900/30 rounded-full border border-emerald-700/30">
+                      <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+                      <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-tighter">Live</span>
+                    </div>
+                  ) : null}
+                </div>
                 <p className="text-xs text-maroon-300 font-medium uppercase tracking-wider">Bristol Medics Hockey</p>
               </div>
             </div>

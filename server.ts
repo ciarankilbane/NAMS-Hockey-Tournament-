@@ -3,188 +3,254 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import { createServer as createViteServer } from "vite";
 import Database from "better-sqlite3";
+import pg from "pg";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("tournament.db");
+const PORT = process.env.PORT || 3000;
+const isProd = process.env.NODE_ENV === "production";
+const DATABASE_URL = process.env.DATABASE_URL;
+
+// Database Abstraction
+interface DB {
+  all: (sql: string, params?: any[]) => Promise<any[]>;
+  get: (sql: string, params?: any[]) => Promise<any>;
+  run: (sql: string, params?: any[]) => Promise<{ lastInsertRowid?: number | string; changes?: number }>;
+  exec: (sql: string) => Promise<void>;
+}
+
+let db: DB;
+
+if (DATABASE_URL) {
+  console.log("Using PostgreSQL database");
+  const pool = new pg.Pool({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
+
+  db = {
+    all: async (sql, params) => {
+      const res = await pool.query(sql.replace(/\?/g, (_, i) => `$${i + 1}`), params);
+      return res.rows;
+    },
+    get: async (sql, params) => {
+      const res = await pool.query(sql.replace(/\?/g, (_, i) => `$${i + 1}`), params);
+      return res.rows[0];
+    },
+    run: async (sql, params) => {
+      // Handle SQLite specific syntax if any, but mostly we'll use standard SQL
+      let query = sql.replace(/\?/g, (_, i) => `$${i + 1}`);
+      if (query.toLowerCase().includes("insert into")) {
+        query += " RETURNING id";
+      }
+      const res = await pool.query(query, params);
+      return { 
+        lastInsertRowid: res.rows[0]?.id,
+        changes: res.rowCount || 0
+      };
+    },
+    exec: async (sql) => {
+      await pool.query(sql);
+    }
+  };
+} else {
+  console.log("Using SQLite database");
+  const sqlite = new Database("tournament.db");
+  db = {
+    all: async (sql, params) => sqlite.prepare(sql).all(params || []),
+    get: async (sql, params) => sqlite.prepare(sql).get(params || []),
+    run: async (sql, params) => {
+      const info = sqlite.prepare(sql).run(params || []);
+      return { lastInsertRowid: info.lastInsertRowid, changes: info.changes };
+    },
+    exec: async (sql) => { sqlite.exec(sql); }
+  };
+}
 
 // Initialize Database
-db.exec(`
-  CREATE TABLE IF NOT EXISTS teams (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    tournament_type TEXT NOT NULL CHECK (tournament_type IN ('chill', 'competitive')),
-    group_name TEXT -- e.g., 'A', 'B', 'C'
-  );
+async function initDb() {
+  const schema = `
+    CREATE TABLE IF NOT EXISTS teams (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      tournament_type TEXT NOT NULL,
+      group_name TEXT
+    );
 
-  CREATE TABLE IF NOT EXISTS matches (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    team1_id INTEGER,
-    team2_id INTEGER,
-    score1 INTEGER DEFAULT 0,
-    score2 INTEGER DEFAULT 0,
-    status TEXT DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'pending', 'completed')),
-    tournament_type TEXT NOT NULL,
-    match_date TEXT, -- e.g., '2026-03-03'
-    start_time TEXT,
-    pitch TEXT,
-    umpire TEXT,
-    stage TEXT DEFAULT 'round-robin',
-    FOREIGN KEY (team1_id) REFERENCES teams(id),
-    FOREIGN KEY (team2_id) REFERENCES teams(id)
-  );
+    CREATE TABLE IF NOT EXISTS matches (
+      id SERIAL PRIMARY KEY,
+      team1_id INTEGER REFERENCES teams(id),
+      team2_id INTEGER REFERENCES teams(id),
+      score1 INTEGER DEFAULT 0,
+      score2 INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'scheduled',
+      tournament_type TEXT NOT NULL,
+      match_date TEXT,
+      start_time TEXT,
+      pitch TEXT,
+      umpire TEXT,
+      stage TEXT DEFAULT 'round-robin'
+    );
 
-  CREATE TABLE IF NOT EXISTS goals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    match_id INTEGER,
-    team_id INTEGER,
-    player_name TEXT NOT NULL,
-    FOREIGN KEY (match_id) REFERENCES matches(id),
-    FOREIGN KEY (team_id) REFERENCES teams(id)
-  );
+    CREATE TABLE IF NOT EXISTS goals (
+      id SERIAL PRIMARY KEY,
+      match_id INTEGER REFERENCES matches(id),
+      team_id INTEGER REFERENCES teams(id),
+      player_name TEXT NOT NULL
+    );
 
-  CREATE TABLE IF NOT EXISTS submissions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    match_id INTEGER,
-    team_id INTEGER,
-    score1 INTEGER,
-    score2 INTEGER,
-    scorers TEXT, -- JSON string of player names
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (match_id) REFERENCES matches(id),
-    FOREIGN KEY (team_id) REFERENCES teams(id),
-    UNIQUE(match_id, team_id)
-  );
-`);
+    CREATE TABLE IF NOT EXISTS submissions (
+      id SERIAL PRIMARY KEY,
+      match_id INTEGER REFERENCES matches(id),
+      team_id INTEGER REFERENCES teams(id),
+      score1 INTEGER,
+      score2 INTEGER,
+      scorers TEXT,
+      timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(match_id, team_id)
+    );
+  `;
 
-// Migration: Ensure group_name column exists
-try {
-  db.prepare("ALTER TABLE teams ADD COLUMN group_name TEXT").run();
-} catch (e) {}
+  // SQLite specific adjustments for initialization if needed
+  if (!DATABASE_URL) {
+    const sqliteSchema = schema
+      .replace(/SERIAL PRIMARY KEY/g, "INTEGER PRIMARY KEY AUTOINCREMENT")
+      .replace(/TIMESTAMP DEFAULT CURRENT_TIMESTAMP/g, "DATETIME DEFAULT CURRENT_TIMESTAMP")
+      .replace(/REFERENCES teams\(id\)/g, ""); // SQLite handles FKs differently in CREATE
+    await db.exec(sqliteSchema);
+  } else {
+    await db.exec(schema);
+  }
 
-// Migration: Ensure match_date column exists
-try {
-  db.prepare("ALTER TABLE matches ADD COLUMN match_date TEXT").run();
-} catch (e) {}
-
-// Migration: Ensure umpire column exists
-try {
-  db.prepare("ALTER TABLE matches ADD COLUMN umpire TEXT").run();
-} catch (e) {
-  // Column already exists or other error
+  // Migrations
+  try { await db.run("ALTER TABLE teams ADD COLUMN group_name TEXT"); } catch (e) {}
+  try { await db.run("ALTER TABLE matches ADD COLUMN match_date TEXT"); } catch (e) {}
+  try { await db.run("ALTER TABLE matches ADD COLUMN umpire TEXT"); } catch (e) {}
 }
 
 async function startServer() {
+  await initDb();
+  
   const app = express();
   const httpServer = createServer(app);
   const io = new Server(httpServer);
-  const PORT = 3000;
 
   app.use(express.json());
 
   // API Routes
-  app.get("/api/data", (req, res) => {
-    const teams = db.prepare("SELECT * FROM teams").all();
-    const matches = db.prepare(`
-      SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-      FROM matches m
-      LEFT JOIN teams t1 ON m.team1_id = t1.id
-      LEFT JOIN teams t2 ON m.team2_id = t2.id
-    `).all();
-    const submissions = db.prepare("SELECT * FROM submissions").all();
-    const goals = db.prepare(`
-      SELECT g.*, t.name as team_name 
-      FROM goals g
-      JOIN teams t ON g.team_id = t.id
-    `).all();
-    res.json({ teams, matches, submissions, goals });
+  app.get("/api/data", async (req, res) => {
+    try {
+      const teams = await db.all("SELECT * FROM teams");
+      const matches = await db.all(`
+        SELECT m.*, t1.name as team1_name, t2.name as team2_name 
+        FROM matches m
+        LEFT JOIN teams t1 ON m.team1_id = t1.id
+        LEFT JOIN teams t2 ON m.team2_id = t2.id
+      `);
+      const submissions = await db.all("SELECT * FROM submissions");
+      const goals = await db.all(`
+        SELECT g.*, t.name as team_name 
+        FROM goals g
+        JOIN teams t ON g.team_id = t.id
+      `);
+      res.json({ teams, matches, submissions, goals });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
-  app.post("/api/teams", (req, res) => {
+  app.post("/api/teams", async (req, res) => {
     const { name, tournament_type, group_name } = req.body;
-    const info = db.prepare("INSERT INTO teams (name, tournament_type, group_name) VALUES (?, ?, ?)").run(name, tournament_type, group_name);
+    const info = await db.run("INSERT INTO teams (name, tournament_type, group_name) VALUES (?, ?, ?)", [name, tournament_type, group_name]);
     const newTeam = { id: info.lastInsertRowid, name, tournament_type, group_name };
     io.emit("team_added", newTeam);
     res.json(newTeam);
   });
 
-  app.post("/api/matches", (req, res) => {
+  app.post("/api/matches", async (req, res) => {
     const { team1_id, team2_id, tournament_type, match_date, start_time, stage } = req.body;
     
-    // Prevent duplicate matches in the same stage
-    const existing = db.prepare(`
+    const existing = await db.get(`
       SELECT id FROM matches 
       WHERE ((team1_id = ? AND team2_id = ?) OR (team1_id = ? AND team2_id = ?))
       AND tournament_type = ? AND stage = ?
-    `).get(team1_id, team2_id, team2_id, team1_id, tournament_type, stage);
+    `, [team1_id, team2_id, team2_id, team1_id, tournament_type, stage]);
 
     if (existing) {
-      return res.json(db.prepare(`
+      const match = await db.get(`
         SELECT m.*, t1.name as team1_name, t2.name as team2_name 
         FROM matches m
         LEFT JOIN teams t1 ON m.team1_id = t1.id
         LEFT JOIN teams t2 ON m.team2_id = t2.id
         WHERE m.id = ?
-      `).get(existing.id));
+      `, [existing.id]);
+      return res.json(match);
     }
 
-    const info = db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, match_date, start_time, stage) VALUES (?, ?, ?, ?, ?, ?)").run(team1_id, team2_id, tournament_type, match_date, start_time, stage);
-    const newMatch = db.prepare(`
+    const info = await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, match_date, start_time, stage) VALUES (?, ?, ?, ?, ?, ?)", [team1_id, team2_id, tournament_type, match_date, start_time, stage]);
+    const newMatch = await db.get(`
       SELECT m.*, t1.name as team1_name, t2.name as team2_name 
       FROM matches m
       LEFT JOIN teams t1 ON m.team1_id = t1.id
       LEFT JOIN teams t2 ON m.team2_id = t2.id
       WHERE m.id = ?
-    `).get(info.lastInsertRowid);
+    `, [info.lastInsertRowid]);
     io.emit("match_added", newMatch);
     res.json(newMatch);
   });
 
-  app.post("/api/submit-score", (req, res) => {
+  app.post("/api/submit-score", async (req, res) => {
     const { match_id, team_id, score1, score2, scorers } = req.body;
     
     try {
-      db.prepare("INSERT OR REPLACE INTO submissions (match_id, team_id, score1, score2, scorers) VALUES (?, ?, ?, ?, ?)").run(match_id, team_id, score1, score2, JSON.stringify(scorers));
+      if (DATABASE_URL) {
+        await db.run(`
+          INSERT INTO submissions (match_id, team_id, score1, score2, scorers) 
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT (match_id, team_id) 
+          DO UPDATE SET score1 = EXCLUDED.score1, score2 = EXCLUDED.score2, scorers = EXCLUDED.scorers
+        `, [match_id, team_id, score1, score2, JSON.stringify(scorers)]);
+      } else {
+        await db.run("INSERT OR REPLACE INTO submissions (match_id, team_id, score1, score2, scorers) VALUES (?, ?, ?, ?, ?)", [match_id, team_id, score1, score2, JSON.stringify(scorers)]);
+      }
       
-      // Check for agreement
-      const match = db.prepare("SELECT * FROM matches WHERE id = ?").get(match_id);
+      const match = await db.get("SELECT * FROM matches WHERE id = ?", [match_id]);
       const otherTeamId = match.team1_id === team_id ? match.team2_id : match.team1_id;
       
-      const otherSubmission = db.prepare("SELECT * FROM submissions WHERE match_id = ? AND team_id = ?").get(match_id, otherTeamId);
+      const otherSubmission = await db.get("SELECT * FROM submissions WHERE match_id = ? AND team_id = ?", [match_id, otherTeamId]);
       
       if (otherSubmission) {
-        // If both submitted, check if they agree
         if (otherSubmission.score1 === score1 && otherSubmission.score2 === score2) {
-          db.prepare("UPDATE matches SET score1 = ?, score2 = ?, status = 'completed' WHERE id = ?").run(score1, score2, match_id);
+          await db.run("UPDATE matches SET score1 = ?, score2 = ?, status = 'completed' WHERE id = ?", [score1, score2, match_id]);
           
-          // Finalize goals
-          db.prepare("DELETE FROM goals WHERE match_id = ?").run(match_id);
-          const allScorers = [...scorers, ...JSON.parse(otherSubmission.scorers)];
-          const stmt = db.prepare("INSERT INTO goals (match_id, team_id, player_name) VALUES (?, ?, ?)");
+          await db.run("DELETE FROM goals WHERE match_id = ?", [match_id]);
+          const otherScorers = typeof otherSubmission.scorers === 'string' ? JSON.parse(otherSubmission.scorers) : otherSubmission.scorers;
+          const allScorers = [...scorers, ...otherScorers];
           
-          // Note: scorers from current submission belong to team_id.
-          // Scorers from otherSubmission belong to otherTeamId.
-          scorers.forEach((name: string) => stmt.run(match_id, team_id, name));
-          JSON.parse(otherSubmission.scorers).forEach((name: string) => stmt.run(match_id, otherTeamId, name));
+          for (const name of scorers) {
+            await db.run("INSERT INTO goals (match_id, team_id, player_name) VALUES (?, ?, ?)", [match_id, team_id, name]);
+          }
+          for (const name of otherScorers) {
+            await db.run("INSERT INTO goals (match_id, team_id, player_name) VALUES (?, ?, ?)", [match_id, otherTeamId, name]);
+          }
 
           io.emit("match_updated", { id: match_id, score1, score2, status: 'completed' });
           
-          // Refresh goal data
-          const goals = db.prepare(`
+          const goals = await db.all(`
             SELECT g.*, t.name as team_name 
             FROM goals g
             JOIN teams t ON g.team_id = t.id
-          `).all();
+          `);
           io.emit("goals_updated", goals);
         } else {
-          db.prepare("UPDATE matches SET status = 'pending' WHERE id = ?").run(match_id);
+          await db.run("UPDATE matches SET status = 'pending' WHERE id = ?", [match_id]);
           io.emit("match_updated", { id: match_id, status: 'pending' });
         }
       } else {
-        db.prepare("UPDATE matches SET status = 'pending' WHERE id = ?").run(match_id);
+        await db.run("UPDATE matches SET status = 'pending' WHERE id = ?", [match_id]);
         io.emit("match_updated", { id: match_id, status: 'pending' });
       }
       
@@ -194,106 +260,79 @@ async function startServer() {
     }
   });
 
-  app.post("/api/generate-knockouts", (req, res) => {
+  app.post("/api/generate-knockouts", async (req, res) => {
     const { tournament_type, teams } = req.body;
-    // teams should be sorted by overall standings if needed, 
-    // but for groups we might need specific logic.
     if (teams.length < 2) return res.status(400).json({ error: "Need more teams" });
 
     if (tournament_type === 'competitive') {
-      // 9 teams total. 
-      // 8v9 Play-off
       if (teams.length >= 9) {
-        db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[7].id, teams[8].id, tournament_type, 'play-off-8v9');
+        await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)", [teams[7].id, teams[8].id, tournament_type, 'play-off-8v9']);
       }
-      
-      // Quarter-finals (Top 7 + Winner of 8v9)
-      // We can't fully automate the winner part yet, so we just create the placeholders or the first 3 quarters
-      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[0].id, null, tournament_type, 'quarter-final'); // 1st vs Winner 8v9 (placeholder)
-      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[1].id, teams[6].id, tournament_type, 'quarter-final'); // 2nd vs 7th
-      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[2].id, teams[5].id, tournament_type, 'quarter-final'); // 3rd vs 6th
-      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[3].id, teams[4].id, tournament_type, 'quarter-final'); // 4th vs 5th
-
+      await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)", [teams[0].id, null, tournament_type, 'quarter-final']);
+      await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)", [teams[1].id, teams[6].id, tournament_type, 'quarter-final']);
+      await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)", [teams[2].id, teams[5].id, tournament_type, 'quarter-final']);
+      await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)", [teams[3].id, teams[4].id, tournament_type, 'quarter-final']);
     } else if (tournament_type === 'chill') {
-      // 13 teams total. 
-      // Semi-finals: Group 1 winner, Group 2 winner, Group 3 winner, Best 2nd place.
-      // The frontend should have calculated these 4 teams.
       if (teams.length >= 4) {
-        db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[0].id, teams[3].id, tournament_type, 'semi-final');
-        db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[1].id, teams[2].id, tournament_type, 'semi-final');
+        await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)", [teams[0].id, teams[3].id, tournament_type, 'semi-final']);
+        await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)", [teams[1].id, teams[2].id, tournament_type, 'semi-final']);
       }
     }
 
-    const newMatches = db.prepare(`
+    const newMatches = await db.all(`
       SELECT m.*, t1.name as team1_name, t2.name as team2_name 
       FROM matches m 
       LEFT JOIN teams t1 ON m.team1_id = t1.id 
       LEFT JOIN teams t2 ON m.team2_id = t2.id 
       WHERE m.tournament_type = ? AND (m.stage LIKE '%final%' OR m.stage LIKE '%play-off%')
       AND m.status = 'scheduled'
-    `).all(tournament_type);
+    `, [tournament_type]);
     
     newMatches.forEach(m => io.emit("match_added", m));
     res.json(newMatches);
   });
 
-  app.post("/api/generate-next-stage", (req, res) => {
+  app.post("/api/generate-next-stage", async (req, res) => {
     const { tournament_type, stage, teams } = req.body;
-    // Generic next stage generator
-    // e.g., Semi-finals from Quarters, or Final from Semis
     if (teams.length < 2) return res.status(400).json({ error: "Need at least 2 teams" });
 
     const matchCount = Math.floor(teams.length / 2);
     for (let i = 0; i < matchCount; i++) {
-      db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[i*2].id, teams[i*2+1].id, tournament_type, stage);
+      await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)", [teams[i*2].id, teams[i*2+1].id, tournament_type, stage]);
     }
 
-    // Handle 3rd/4th play-off if stage is 'final'
     if (stage === 'final' && teams.length >= 4) {
-       // Assuming teams[2] and teams[3] are losers of semis passed by frontend
-       db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(teams[2].id, teams[3].id, tournament_type, '3rd-4th-play-off');
+       await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)", [teams[2].id, teams[3].id, tournament_type, '3rd-4th-play-off']);
     }
 
-    const newMatches = db.prepare(`
+    const newMatches = await db.all(`
       SELECT m.*, t1.name as team1_name, t2.name as team2_name 
       FROM matches m 
       LEFT JOIN teams t1 ON m.team1_id = t1.id 
       LEFT JOIN teams t2 ON m.team2_id = t2.id 
       WHERE m.tournament_type = ? AND m.stage = ?
       AND m.status = 'scheduled'
-    `).all(tournament_type, stage);
+    `, [tournament_type, stage]);
     
     newMatches.forEach(m => io.emit("match_added", m));
     res.json(newMatches);
   });
 
-  app.post("/api/generate-final", (req, res) => {
-    const { tournament_type, winners } = req.body;
-    if (winners.length < 2) return res.status(400).json({ error: "Need 2 winners" });
-
-    db.prepare("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)").run(winners[0].id, winners[1].id, tournament_type, 'final');
-    
-    const newMatch = db.prepare("SELECT m.*, t1.name as team1_name, t2.name as team2_name FROM matches m LEFT JOIN teams t1 ON m.team1_id = t1.id LEFT JOIN teams t2 ON m.team2_id = t2.id WHERE m.tournament_type = ? AND m.stage = 'final'").get(tournament_type);
-    
-    io.emit("match_added", newMatch);
-    res.json(newMatch);
-  });
-
-  app.post("/api/admin/force-approve", (req, res) => {
+  app.post("/api/admin/force-approve", async (req, res) => {
     const { submission_id } = req.body;
     try {
-      const submission = db.prepare("SELECT * FROM submissions WHERE id = ?").get(submission_id);
+      const submission = await db.get("SELECT * FROM submissions WHERE id = ?", [submission_id]);
       if (!submission) return res.status(404).json({ error: "Submission not found" });
 
-      db.prepare("UPDATE matches SET score1 = ?, score2 = ?, status = 'completed' WHERE id = ?").run(submission.score1, submission.score2, submission.match_id);
+      await db.run("UPDATE matches SET score1 = ?, score2 = ?, status = 'completed' WHERE id = ?", [submission.score1, submission.score2, submission.match_id]);
       
-      const updatedMatch = db.prepare(`
+      const updatedMatch = await db.get(`
         SELECT m.*, t1.name as team1_name, t2.name as team2_name 
         FROM matches m
         LEFT JOIN teams t1 ON m.team1_id = t1.id
         LEFT JOIN teams t2 ON m.team2_id = t2.id
         WHERE m.id = ?
-      `).get(submission.match_id);
+      `, [submission.match_id]);
 
       io.emit("match_updated", updatedMatch);
       res.json({ success: true });
@@ -302,51 +341,45 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/teams/:id", (req, res) => {
+  app.delete("/api/teams/:id", async (req, res) => {
     const { id } = req.params;
     try {
-      db.prepare("DELETE FROM submissions WHERE match_id IN (SELECT id FROM matches WHERE team1_id = ? OR team2_id = ?)").run(id, id);
-      db.prepare("DELETE FROM matches WHERE team1_id = ? OR team2_id = ?").run(id, id);
-      db.prepare("DELETE FROM teams WHERE id = ?").run(id);
+      await db.run("DELETE FROM submissions WHERE match_id IN (SELECT id FROM matches WHERE team1_id = ? OR team2_id = ?)", [id, id]);
+      await db.run("DELETE FROM matches WHERE team1_id = ? OR team2_id = ?", [id, id]);
+      await db.run("DELETE FROM teams WHERE id = ?", [id]);
       
-      // Fetch full data and emit a refresh signal instead of full reset
-      const teams = db.prepare("SELECT * FROM teams").all();
-      const matches = db.prepare(`
+      const teams = await db.all("SELECT * FROM teams");
+      const matches = await db.all(`
         SELECT m.*, t1.name as team1_name, t2.name as team2_name 
         FROM matches m
         LEFT JOIN teams t1 ON m.team1_id = t1.id
         LEFT JOIN teams t2 ON m.team2_id = t2.id
-      `).all();
-      const submissions = db.prepare("SELECT * FROM submissions").all();
-      const goals = db.prepare(`
+      `);
+      const submissions = await db.all("SELECT * FROM submissions");
+      const goals = await db.all(`
         SELECT g.*, t.name as team_name 
         FROM goals g
         JOIN teams t ON g.team_id = t.id
-      `).all();
+      `);
       
       io.emit("data_updated", { teams, matches, submissions, goals });
       res.json({ success: true });
     } catch (error) {
-      console.error('Delete team error:', error);
       res.status(500).json({ error: error.message });
     }
   });
 
-  app.post("/api/admin/update-match", (req, res) => {
+  app.post("/api/admin/update-match", async (req, res) => {
     const { match_id, score1, score2, status, match_date, start_time, pitch, umpire } = req.body;
-    console.log(`Updating match ${match_id}:`, { score1, score2, status, match_date, start_time, pitch, umpire });
     try {
-      const current = db.prepare("SELECT * FROM matches WHERE id = ?").get(match_id);
-      if (!current) {
-        console.error(`Match ${match_id} not found`);
-        return res.status(404).json({ error: "Match not found" });
-      }
+      const current = await db.get("SELECT * FROM matches WHERE id = ?", [match_id]);
+      if (!current) return res.status(404).json({ error: "Match not found" });
 
-      const result = db.prepare(`
+      await db.run(`
         UPDATE matches 
         SET score1 = ?, score2 = ?, status = ?, match_date = ?, start_time = ?, pitch = ?, umpire = ? 
         WHERE id = ?
-      `).run(
+      `, [
         score1 !== undefined ? score1 : current.score1,
         score2 !== undefined ? score2 : current.score2,
         status !== undefined ? status : current.status,
@@ -355,17 +388,15 @@ async function startServer() {
         pitch !== undefined ? pitch : current.pitch,
         umpire !== undefined ? umpire : current.umpire,
         match_id
-      );
+      ]);
       
-      console.log(`Match ${match_id} updated successfully. Rows affected: ${result.changes}`);
-      
-      const updatedMatch = db.prepare(`
+      const updatedMatch = await db.get(`
         SELECT m.*, t1.name as team1_name, t2.name as team2_name 
         FROM matches m
         LEFT JOIN teams t1 ON m.team1_id = t1.id
         LEFT JOIN teams t2 ON m.team2_id = t2.id
         WHERE m.id = ?
-      `).get(match_id);
+      `, [match_id]);
       
       if (updatedMatch) {
         io.emit("match_updated", updatedMatch);
@@ -376,15 +407,15 @@ async function startServer() {
     }
   });
 
-  app.post("/api/admin/add-break", (req, res) => {
+  app.post("/api/admin/add-break", async (req, res) => {
     const { tournament_type, match_date, start_time, pitch, stage } = req.body;
     try {
-      const info = db.prepare("INSERT INTO matches (tournament_type, match_date, start_time, pitch, stage, status) VALUES (?, ?, ?, ?, ?, 'completed')").run(tournament_type, match_date, start_time, pitch, stage);
-      const newMatch = db.prepare(`
+      const info = await db.run("INSERT INTO matches (tournament_type, match_date, start_time, pitch, stage, status) VALUES (?, ?, ?, ?, ?, 'completed')", [tournament_type, match_date, start_time, pitch, stage]);
+      const newMatch = await db.get(`
         SELECT m.*, NULL as team1_name, NULL as team2_name 
         FROM matches m
         WHERE m.id = ?
-      `).get(info.lastInsertRowid);
+      `, [info.lastInsertRowid]);
       io.emit("match_added", newMatch);
       res.json(newMatch);
     } catch (error) {
@@ -392,29 +423,28 @@ async function startServer() {
     }
   });
 
-  // Admin: Reset everything (for testing)
-  app.post("/api/reset", (req, res) => {
-    db.exec("DELETE FROM submissions; DELETE FROM matches; DELETE FROM teams; DELETE FROM goals;");
+  app.post("/api/reset", async (req, res) => {
+    await db.exec("DELETE FROM submissions; DELETE FROM matches; DELETE FROM teams; DELETE FROM goals;");
     io.emit("data_reset");
     res.json({ success: true });
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  // Serve static files in production
+  if (isProd) {
+    app.use(express.static(path.join(__dirname, "dist")));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(__dirname, "dist", "index.html"));
+    });
+  } else {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
-  } else {
-    app.use(express.static(path.join(__dirname, "dist")));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(__dirname, "dist", "index.html"));
-    });
   }
 
-  httpServer.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  httpServer.listen(Number(PORT), "0.0.0.0", () => {
+    console.log(`Server running on port ${PORT}`);
   });
 }
 
