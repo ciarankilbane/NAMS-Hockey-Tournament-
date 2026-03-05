@@ -317,7 +317,12 @@ async function startServer() {
   });
 
   app.post("/api/submit-score", async (req, res) => {
-    const { match_id, team_id, score1, score2, scorers } = req.body;
+    const { scorers } = req.body;
+    // Force numbers to avoid type mismatch bugs with PostgreSQL
+    const match_id = Number(req.body.match_id);
+    const team_id = Number(req.body.team_id);
+    const score1 = Number(req.body.score1);
+    const score2 = Number(req.body.score2);
     try {
       if (db.type === "postgres") {
         await db.run(`
@@ -334,14 +339,14 @@ async function startServer() {
       }
 
       const match = await db.get("SELECT * FROM matches WHERE id = ?", [match_id]);
-      const otherTeamId = match.team1_id === team_id ? match.team2_id : match.team1_id;
+      const otherTeamId = Number(match.team1_id) === team_id ? Number(match.team2_id) : Number(match.team1_id);
       const otherSubmission = await db.get(
         "SELECT * FROM submissions WHERE match_id = ? AND team_id = ?",
         [match_id, otherTeamId]
       );
 
       if (otherSubmission) {
-        if (otherSubmission.score1 === score1 && otherSubmission.score2 === score2) {
+        if (Number(otherSubmission.score1) === score1 && Number(otherSubmission.score2) === score2) {
           await db.run(
             "UPDATE matches SET score1 = ?, score2 = ?, status = 'completed' WHERE id = ?",
             [score1, score2, match_id]
@@ -581,4 +586,3 @@ async function startServer() {
 }
 
 startServer();
-
