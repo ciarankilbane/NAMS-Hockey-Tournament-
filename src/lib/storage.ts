@@ -36,6 +36,12 @@ export const storage = {
     storage.saveData(data);
   },
 
+  updateTeam: (id: number, updates: Partial<Team>) => {
+    const data = storage.getData();
+    data.teams = data.teams.map(t => t.id === id ? { ...t, ...updates } : t);
+    storage.saveData(data);
+  },
+
   addMatch: (match: Omit<Match, 'id' | 'score1' | 'score2' | 'status'>): Match => {
     const data = storage.getData();
     const newMatch: Match = {
@@ -61,6 +67,40 @@ export const storage = {
     }));
     data.matches.push(...newMatches);
     storage.saveData(data);
+  },
+
+  fillPlaceholderMatches: (newMatches: Omit<Match, 'id' | 'score1' | 'score2' | 'status'>[]) => {
+    const data = storage.getData();
+    const updatedMatches = [...data.matches];
+    
+    for (const nm of newMatches) {
+      const placeholderIdx = updatedMatches.findIndex(m => 
+        m.tournament_type === nm.tournament_type && 
+        m.stage === nm.stage && 
+        (m.team1_id === 0 || !m.team1_id) &&
+        (m.team2_id === 0 || !m.team2_id) &&
+        m.status === 'scheduled'
+      );
+      
+      if (placeholderIdx !== -1) {
+        updatedMatches[placeholderIdx] = {
+          ...updatedMatches[placeholderIdx],
+          team1_id: nm.team1_id,
+          team2_id: nm.team2_id,
+          team1_name: nm.team1_name,
+          team2_name: nm.team2_name
+        };
+      } else {
+        updatedMatches.push({
+          ...nm,
+          id: Date.now() + Math.random(),
+          score1: 0,
+          score2: 0,
+          status: 'scheduled' as const
+        });
+      }
+    }
+    storage.saveData({ ...data, matches: updatedMatches });
   },
 
   updateMatch: (id: number, updates: Partial<Match>) => {

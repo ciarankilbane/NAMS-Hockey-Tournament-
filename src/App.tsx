@@ -696,7 +696,9 @@ function MobileTabButton({ active, onClick, icon, label }: { active: boolean, on
 }
 
 const MatchCard: React.FC<{ match: Match, isFavorite?: boolean }> = ({ match, isFavorite }) => {
-  const isBreak = !match.team1_id && !match.team2_id;
+  const isBreak = !match.team1_id && !match.team2_id && match.stage === 'break';
+  const team1Display = match.team1_name || (match.team1_id === 0 ? 'TBD' : 'Unknown');
+  const team2Display = match.team2_name || (match.team2_id === 0 ? 'TBD' : 'Unknown');
 
   return (
     <div className={cn(
@@ -754,7 +756,7 @@ const MatchCard: React.FC<{ match: Match, isFavorite?: boolean }> = ({ match, is
       ) : (
         <div className="flex items-center justify-between gap-4">
           <div className="flex-1 flex flex-col items-center text-center">
-            <span className="text-sm font-bold text-stone-800 line-clamp-1">{match.team1_name}</span>
+            <span className="text-sm font-bold text-stone-800 line-clamp-1">{team1Display}</span>
           </div>
           <div className="flex items-center gap-3 px-3 py-1 bg-stone-100 rounded-lg">
             <span className={cn("text-lg font-black", match.status === 'completed' ? "text-stone-900" : "text-stone-300")}>
@@ -766,7 +768,7 @@ const MatchCard: React.FC<{ match: Match, isFavorite?: boolean }> = ({ match, is
             </span>
           </div>
           <div className="flex-1 flex flex-col items-center text-center">
-            <span className="text-sm font-bold text-stone-800 line-clamp-1">{match.team2_name}</span>
+            <span className="text-sm font-bold text-stone-800 line-clamp-1">{team2Display}</span>
           </div>
         </div>
       )}
@@ -802,7 +804,11 @@ function LiveDashboard({ matches }: { matches: Match[] }) {
     const currentDateStr = now.toISOString().split('T')[0];
     
     const live = matches.filter(m => {
-      if (!m.start_time || m.status === 'completed' || !m.team1_id) return false;
+      if (!m.team1_id) return false;
+      if (m.status === 'completed') return false;
+      if (m.status === 'pending') return true;
+      
+      if (!m.start_time) return false;
       
       // If match has a date, it MUST match today
       if (m.match_date && m.match_date !== currentDateStr) return false;
@@ -811,7 +817,7 @@ function LiveDashboard({ matches }: { matches: Match[] }) {
       const matchTime = new Date(`2024-01-01T${m.start_time}:00`);
       const currentTime = new Date(`2024-01-01T${currentTimeStr}:00`);
       const diff = (currentTime.getTime() - matchTime.getTime()) / 60000;
-      // Match is "live" if it started within the last 30 minutes (increased from 20)
+      // Match is "live" if it started within the last 30 minutes
       return diff >= 0 && diff < 30;
     });
 
@@ -904,8 +910,12 @@ function LiveDashboard({ matches }: { matches: Match[] }) {
                     ))}
                   </div>
                 ) : (
-                  <div className="py-4">
-                    <span className="text-xl font-black text-stone-200 uppercase tracking-tighter italic">Free</span>
+                  <div className="py-4 flex flex-col items-center">
+                    <div className="w-10 h-10 rounded-full bg-emerald-50 flex items-center justify-center mb-2">
+                      <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                    </div>
+                    <span className="text-xs font-black text-emerald-600 uppercase tracking-widest">Available</span>
+                    <span className="text-[10px] font-bold text-stone-300 mt-0.5 uppercase italic">Pitch Free</span>
                   </div>
                 )}
               </div>
@@ -1020,7 +1030,8 @@ function TopScorers({ goals }: { goals: Goal[] }) {
     if (!captainTeamId) return [];
     return matches.filter(m => 
       (m.team1_id === captainTeamId || m.team2_id === captainTeamId) && 
-      m.status !== 'completed'
+      m.status !== 'completed' &&
+      m.team1_id !== 0 && m.team2_id !== 0
     );
   }, [matches, captainTeamId]);
 
@@ -1234,7 +1245,18 @@ function TopScorers({ goals }: { goals: Goal[] }) {
   );
 };
 
-const AdminPanel: React.FC<{ 
+const TOURNAMENT_SLOTS: Record<string, Record<'chill' | 'competitive', string[]>> = {
+  '2026-03-07': {
+    chill: ['09:00', '09:20', '09:40', '10:00', '10:20', '10:40', '11:00', '11:20', '11:40', '12:00', '12:20', '12:40'],
+    competitive: ['09:10', '09:35', '10:00', '10:25', '10:50', '11:15', '11:40', '12:05', '12:30']
+  },
+  '2026-03-08': {
+    chill: ['11:30', '11:50', '12:10', '12:30', '12:50', '13:10', '13:30'],
+    competitive: ['12:00', '12:25', '12:50', '13:15', '13:40']
+  }
+};
+
+function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace, submissions, goals, onRefresh, isLocalMode }: { 
   teams: Team[], 
   matches: Match[], 
   tournamentType: TournamentType,
@@ -1244,10 +1266,9 @@ const AdminPanel: React.FC<{
   goals: Goal[],
   onRefresh: () => void,
   isLocalMode: boolean
-}> = ({ teams, matches, tournamentType, standings, bestSecondPlace, submissions, goals, onRefresh, isLocalMode }) => {
+}) {
   const [newTeamName, setNewTeamName] = useState('');
-  const [newTeamGroup, setNewTeamGroup] = useState('A');
-  const [isResetting, setIsResetting] = useState(false);
+  const [newTeamGroup, setNewTeamGroup] = useState('Group 1');
   const [editingMatchId, setEditingMatchId] = useState<number | null>(null);
   const [editScore1, setEditScore1] = useState(0);
   const [editScore2, setEditScore2] = useState(0);
@@ -1259,16 +1280,13 @@ const AdminPanel: React.FC<{
 
   const [bulkDate, setBulkDate] = useState(new Date().toISOString().split('T')[0]);
   const [bulkStartTime, setBulkStartTime] = useState('10:00');
+  const [bulkEndTime, setBulkEndTime] = useState('17:00');
   const [bulkInterval, setBulkInterval] = useState(20);
   const [bulkPitch, setBulkPitch] = useState('1');
-
+  const [selectedBulkMatchIds, setSelectedBulkMatchIds] = useState<number[]>([]);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
-
-  const [autoDate, setAutoDate] = useState(new Date().toISOString().split('T')[0]);
-  const [autoStartTime, setAutoStartTime] = useState('09:00');
-  const [autoEndTime, setAutoEndTime] = useState('17:00');
-  const [autoNumPitches, setAutoNumPitches] = useState(2);
+  const [isResetting, setIsResetting] = useState(false);
 
   const [breakLabel, setBreakLabel] = useState('');
   const [breakDate, setBreakDate] = useState(new Date().toISOString().split('T')[0]);
@@ -1293,19 +1311,80 @@ const AdminPanel: React.FC<{
     m.stage?.toLowerCase().includes(matchSearch.toLowerCase())
   );
 
-  const addTeam = async () => {
-    if (!newTeamName) return;
+  const [editingTeamId, setEditingTeamId] = useState<number | null>(null);
+  const [editTeamName, setEditTeamName] = useState('');
+  const [editTeamGroup, setEditTeamGroup] = useState('');
+
+  const [newMatchTeam1, setNewMatchTeam1] = useState<number | null>(null);
+  const [newMatchTeam2, setNewMatchTeam2] = useState<number | null>(null);
+  const [newMatchDate, setNewMatchDate] = useState('2026-03-07');
+  const [newMatchTime, setNewMatchTime] = useState('');
+  const [newMatchPitch, setNewMatchPitch] = useState('1');
+  const [newMatchStage, setNewMatchStage] = useState('round-robin');
+  const [newMatchUmpire, setNewMatchUmpire] = useState('');
+
+  const addMatch = async () => {
+    if (newMatchTeam1 === null || newMatchTeam2 === null || !newMatchTime) return;
+    const matchData = {
+      team1_id: newMatchTeam1,
+      team2_id: newMatchTeam2,
+      tournament_type: tournamentType,
+      match_date: newMatchDate,
+      start_time: newMatchTime,
+      pitch: newMatchPitch,
+      stage: newMatchStage,
+      umpire: newMatchUmpire,
+      status: 'scheduled'
+    };
+
     if (isLocalMode) {
-      storage.addTeam({ name: newTeamName, tournament_type: tournamentType, group_name: newTeamGroup });
+      storage.addMatches([matchData as any]);
+      onRefresh();
     } else {
-      await fetch('/api/teams', {
+      await fetch('/api/admin/add-match', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newTeamName, tournament_type: tournamentType, group_name: newTeamGroup })
+        body: JSON.stringify(matchData)
       });
     }
-    setNewTeamName('');
-    onRefresh();
+    setNewMatchTeam1(null);
+    setNewMatchTeam2(null);
+    setNewMatchTime('');
+  };
+
+  const updateTeam = async (id: number, name: string, group_name: string) => {
+    if (isLocalMode) {
+      storage.updateTeam(id, { name, group_name });
+      onRefresh();
+    } else {
+      await fetch('/api/admin/update-team', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, name, group_name })
+      });
+      onRefresh();
+    }
+    setEditingTeamId(null);
+  };
+
+  const addTeam = async () => {
+    if (!newTeamName) return;
+    try {
+      if (isLocalMode) {
+        storage.addTeam({ name: newTeamName, tournament_type: tournamentType, group_name: newTeamGroup });
+      } else {
+        const res = await fetch('/api/teams', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newTeamName, tournament_type: tournamentType, group_name: newTeamGroup })
+        });
+        if (!res.ok) throw new Error('Failed to add team');
+      }
+      setNewTeamName('');
+      onRefresh();
+    } catch (err: any) {
+      alert(`Error adding team: ${err.message}`);
+    }
   };
 
   const removeTeam = async (id: number) => {
@@ -1467,16 +1546,23 @@ const AdminPanel: React.FC<{
   };
 
   const bulkSchedule = async () => {
-    if (filteredMatches.length === 0) return;
+    if (selectedBulkMatchIds.length === 0) return;
     
     let currentTime = new Date(`2024-01-01T${bulkStartTime}:00`);
+    const endTime = new Date(`2024-01-01T${bulkEndTime}:00`);
     
-    for (const match of filteredMatches) {
+    for (const matchId of selectedBulkMatchIds) {
+      if (currentTime.getTime() > endTime.getTime()) break;
+      
+      const match = matches.find(m => m.id === matchId);
+      if (!match) continue;
+
       const timeStr = currentTime.toTimeString().slice(0, 5);
       if (isLocalMode) {
         storage.updateMatch(match.id, {
           match_date: bulkDate,
-          start_time: timeStr
+          start_time: timeStr,
+          pitch: bulkPitch
         });
       } else {
         await fetch('/api/admin/update-match', {
@@ -1489,19 +1575,23 @@ const AdminPanel: React.FC<{
             status: match.status,
             match_date: bulkDate,
             start_time: timeStr,
-            pitch: match.pitch,
+            pitch: bulkPitch,
             umpire: match.umpire
           })
         });
       }
       currentTime = new Date(currentTime.getTime() + bulkInterval * 60000);
     }
+    setSelectedBulkMatchIds([]);
     onRefresh();
   };
 
   const bulkAssignPitches = async () => {
-    if (filteredMatches.length === 0) return;
-    for (const match of filteredMatches) {
+    if (selectedBulkMatchIds.length === 0) return;
+    for (const matchId of selectedBulkMatchIds) {
+      const match = matches.find(m => m.id === matchId);
+      if (!match) continue;
+
       if (isLocalMode) {
         storage.updateMatch(match.id, { pitch: bulkPitch });
       } else {
@@ -1521,54 +1611,7 @@ const AdminPanel: React.FC<{
         });
       }
     }
-    onRefresh();
-  };
-
-  const autoScheduleAll = async () => {
-    const allMatches = matches.filter(m => m.team1_id && m.team2_id); // Only actual matches, not breaks
-    if (allMatches.length === 0) return;
-
-    const start = new Date(`2024-01-01T${autoStartTime}:00`);
-    const end = new Date(`2024-01-01T${autoEndTime}:00`);
-    const totalMinutes = (end.getTime() - start.getTime()) / 60000;
-    
-    const slotsNeeded = Math.ceil(allMatches.length / autoNumPitches);
-    const interval = Math.floor(totalMinutes / slotsNeeded);
-
-    let currentMatchIdx = 0;
-    for (let slot = 0; slot < slotsNeeded; slot++) {
-      const slotTime = new Date(start.getTime() + slot * interval * 60000);
-      const timeStr = slotTime.toTimeString().slice(0, 5);
-      
-      for (let p = 1; p <= autoNumPitches; p++) {
-        if (currentMatchIdx >= allMatches.length) break;
-        
-        const match = allMatches[currentMatchIdx];
-        if (isLocalMode) {
-          storage.updateMatch(match.id, {
-            match_date: autoDate,
-            start_time: timeStr,
-            pitch: p.toString()
-          });
-        } else {
-          await fetch('/api/admin/update-match', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              match_id: match.id, 
-              score1: match.score1, 
-              score2: match.score2, 
-              status: match.status,
-              match_date: autoDate,
-              start_time: timeStr,
-              pitch: p.toString(),
-              umpire: match.umpire
-            })
-          });
-        }
-        currentMatchIdx++;
-      }
-    }
+    setSelectedBulkMatchIds([]);
     onRefresh();
   };
 
@@ -1688,71 +1731,111 @@ const AdminPanel: React.FC<{
     <div className="space-y-8">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
-          <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
-            <Plus className="w-5 h-5 text-maroon-700" />
-            Manage Teams ({tournamentType})
-          </h3>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Users className="w-5 h-5 text-maroon-700" />
+              Team Management ({tournamentType})
+            </h3>
+          </div>
           <div className="flex flex-col sm:flex-row gap-2 mb-6">
-            <input 
-              type="text" 
-              placeholder="Team Name"
-              value={newTeamName}
-              onChange={(e) => setNewTeamName(e.target.value)}
-              className="flex-1 bg-stone-50 border border-stone-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
-            />
-            <div className="flex gap-2">
-              <select 
+            <div className="flex-1 flex flex-col sm:flex-row gap-2">
+              <input 
+                type="text" 
+                placeholder="Team Name"
+                value={newTeamName}
+                onChange={(e) => setNewTeamName(e.target.value)}
+                className="flex-1 bg-stone-50 border border-stone-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
+              />
+              <input 
+                type="text" 
+                placeholder="Group"
                 value={newTeamGroup}
                 onChange={(e) => setNewTeamGroup(e.target.value)}
-                className="flex-1 sm:flex-none bg-stone-50 border border-stone-200 rounded-xl px-2 py-2 text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
-              >
-                <option value="A">Grp A</option>
-                <option value="B">Grp B</option>
-                <option value="C">Grp C</option>
-              </select>
-              <button 
-                onClick={addTeam}
-                className="flex-1 sm:flex-none bg-maroon-700 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-maroon-800 transition-all"
-              >
-                Add
-              </button>
+                className="w-full sm:w-32 bg-stone-50 border border-stone-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
+              />
             </div>
+            <button 
+              onClick={addTeam}
+              className="bg-maroon-700 text-white px-6 py-2 rounded-xl font-bold text-sm hover:bg-maroon-800 transition-all whitespace-nowrap"
+            >
+              Add Team
+            </button>
           </div>
           <div className="space-y-2 max-h-64 overflow-y-auto pr-2">
             {filteredTeams.map(team => (
               <div key={team.id} className="flex justify-between items-center p-3 bg-stone-50 rounded-lg border border-stone-100">
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-black bg-stone-200 text-stone-600 px-1.5 py-0.5 rounded">GRP {team.group_name}</span>
-                  <span className="font-medium text-sm text-stone-800">{team.name}</span>
+                <div className="flex-1 flex items-center gap-2">
+                  {editingTeamId === team.id ? (
+                    <div className="flex flex-1 gap-2">
+                      <input 
+                        type="text" 
+                        value={editTeamName} 
+                        onChange={e => setEditTeamName(e.target.value)}
+                        className="flex-1 bg-white border border-maroon-300 rounded px-2 py-1 text-sm"
+                      />
+                      <input 
+                        type="text" 
+                        value={editTeamGroup}
+                        onChange={e => setEditTeamGroup(e.target.value)}
+                        className="w-24 bg-white border border-maroon-300 rounded px-2 py-1 text-sm"
+                        placeholder="Group"
+                      />
+                      <button 
+                        onClick={() => updateTeam(team.id, editTeamName, editTeamGroup)}
+                        className="bg-maroon-700 text-white px-2 py-1 rounded text-[10px] font-bold"
+                      >
+                        Save
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <span className="text-[10px] font-black bg-stone-200 text-stone-600 px-1.5 py-0.5 rounded">{team.group_name}</span>
+                      <span className="font-medium text-sm text-stone-800">{team.name}</span>
+                    </>
+                  )}
                 </div>
-                {confirmDeleteId === team.id ? (
-                  <div className="flex items-center gap-2 animate-in fade-in slide-in-from-right-2 duration-200">
+                <div className="flex items-center gap-2">
+                  {editingTeamId !== team.id && (
                     <button 
                       onClick={() => {
-                        removeTeam(team.id);
-                        setConfirmDeleteId(null);
+                        setEditingTeamId(team.id);
+                        setEditTeamName(team.name);
+                        setEditTeamGroup(team.group_name || '');
                       }}
-                      className="bg-maroon-700 text-white text-[10px] font-bold px-3 py-1.5 rounded-lg hover:bg-maroon-800 transition-all"
+                      className="p-2 text-stone-400 hover:text-maroon-700 transition-all"
                     >
-                      Confirm
+                      <Edit2 className="w-4 h-4" />
                     </button>
+                  )}
+                  {confirmDeleteId === team.id ? (
+                    <div className="flex items-center gap-2 animate-in fade-in slide-in-from-right-2 duration-200">
+                      <button 
+                        onClick={() => {
+                          removeTeam(team.id);
+                          setConfirmDeleteId(null);
+                        }}
+                        className="bg-maroon-700 text-white text-[10px] font-bold px-3 py-1.5 rounded-lg hover:bg-maroon-800 transition-all"
+                      >
+                        Confirm
+                      </button>
+                      <button 
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="bg-stone-200 text-stone-600 text-[10px] font-bold px-3 py-1.5 rounded-lg hover:bg-stone-300 transition-all"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
                     <button 
-                      onClick={() => setConfirmDeleteId(null)}
-                      className="bg-stone-200 text-stone-600 text-[10px] font-bold px-3 py-1.5 rounded-lg hover:bg-stone-300 transition-all"
+                      type="button"
+                      onClick={() => setConfirmDeleteId(team.id)}
+                      className="inline-flex items-center gap-2 bg-stone-100 text-stone-400 hover:text-red-600 hover:bg-red-50 px-3 py-2 rounded-xl transition-all cursor-pointer"
                     >
-                      Cancel
+                      <Trash2 className="w-4 h-4" />
+                      <span className="text-xs font-bold">Delete</span>
                     </button>
-                  </div>
-                ) : (
-                  <button 
-                    type="button"
-                    onClick={() => setConfirmDeleteId(team.id)}
-                    className="inline-flex items-center gap-2 bg-stone-100 text-stone-400 hover:text-red-600 hover:bg-red-50 px-3 py-2 rounded-xl transition-all cursor-pointer"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                    <span className="text-xs font-bold">Delete</span>
-                  </button>
-                )}
+                  )}
+                </div>
               </div>
             ))}
             {filteredTeams.length === 0 && <p className="text-center text-stone-400 text-sm italic py-4">No teams added</p>}
@@ -1761,11 +1844,111 @@ const AdminPanel: React.FC<{
 
         <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
           <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
+            <Plus className="w-5 h-5 text-maroon-700" />
+            Add Manual Match ({tournamentType})
+          </h3>
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-500 uppercase">Team 1</label>
+                <select 
+                  value={newMatchTeam1 || ''} 
+                  onChange={e => setNewMatchTeam1(Number(e.target.value))}
+                  className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                >
+                  <option value="">Select Team 1</option>
+                  <option value="0">TBD / Placeholder</option>
+                  {filteredTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-500 uppercase">Team 2</label>
+                <select 
+                  value={newMatchTeam2 || ''} 
+                  onChange={e => setNewMatchTeam2(Number(e.target.value))}
+                  className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                >
+                  <option value="">Select Team 2</option>
+                  <option value="0">TBD / Placeholder</option>
+                  {filteredTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-500 uppercase">Date</label>
+                <select 
+                  value={newMatchDate} 
+                  onChange={e => {
+                    setNewMatchDate(e.target.value);
+                    setNewMatchTime(''); 
+                  }}
+                  className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                >
+                  <option value="2026-03-07">Sat Mar 7</option>
+                  <option value="2026-03-08">Sun Mar 8</option>
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-500 uppercase">Time Slot</label>
+                <select 
+                  value={newMatchTime} 
+                  onChange={e => setNewMatchTime(e.target.value)}
+                  className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                >
+                  <option value="">Select Slot</option>
+                  {TOURNAMENT_SLOTS[newMatchDate]?.[tournamentType].map(slot => (
+                    <option key={slot} value={slot}>{slot}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-500 uppercase">Pitch</label>
+                <select 
+                  value={newMatchPitch} 
+                  onChange={e => setNewMatchPitch(e.target.value)}
+                  className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                >
+                  <option value="1">Pitch 1</option>
+                  <option value="2">Pitch 2</option>
+                  <option value="3">Pitch 3</option>
+                  <option value="4">Pitch 4</option>
+                  <option value="A">Pitch A</option>
+                  <option value="B">Pitch B</option>
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-500 uppercase">Stage</label>
+                <select 
+                  value={newMatchStage} 
+                  onChange={e => setNewMatchStage(e.target.value)}
+                  className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                >
+                  <option value="round-robin">Round Robin</option>
+                  <option value="quarter-final">Quarter Final</option>
+                  <option value="semi-final">Semi Final</option>
+                  <option value="final">Final</option>
+                  <option value="3rd-4th-play-off">3rd/4th Play-off</option>
+                </select>
+              </div>
+            </div>
+            <button 
+              onClick={addMatch}
+              disabled={newMatchTeam1 === null || newMatchTeam2 === null || !newMatchTime}
+              className="w-full bg-maroon-700 text-white py-3 rounded-xl font-bold hover:bg-maroon-800 transition-all disabled:opacity-50"
+            >
+              Add Match
+            </button>
+          </div>
+        </section>
+
+        <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
+          <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
             <Clock className="w-5 h-5 text-maroon-700" />
             Bulk Scheduler ({tournamentType})
           </h3>
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
               <div className="space-y-1">
                 <label className="text-[10px] font-bold text-stone-500 uppercase">Date</label>
                 <input 
@@ -1781,6 +1964,15 @@ const AdminPanel: React.FC<{
                   type="time" 
                   value={bulkStartTime}
                   onChange={(e) => setBulkStartTime(e.target.value)}
+                  className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-500 uppercase">Finish Time</label>
+                <input 
+                  type="time" 
+                  value={bulkEndTime}
+                  onChange={(e) => setBulkEndTime(e.target.value)}
                   className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
                 />
               </div>
@@ -1802,86 +1994,161 @@ const AdminPanel: React.FC<{
                 >
                   <option value="1">Pitch 1</option>
                   <option value="2">Pitch 2</option>
+                  <option value="3">Pitch 3</option>
+                  <option value="4">Pitch 4</option>
+                  <option value="A">Pitch A</option>
+                  <option value="B">Pitch B</option>
                 </select>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <button 
-                onClick={bulkSchedule}
-                disabled={filteredMatches.length === 0}
-                className="bg-black text-white py-3 rounded-xl font-bold hover:bg-stone-800 disabled:bg-stone-200 transition-all text-sm"
-              >
-                Apply Times
-              </button>
-              <button 
-                onClick={bulkAssignPitches}
-                disabled={filteredMatches.length === 0}
-                className="bg-maroon-900 text-white py-3 rounded-xl font-bold hover:bg-maroon-950 disabled:bg-stone-200 transition-all text-sm"
-              >
-                Apply Pitches
-              </button>
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-stone-500 uppercase tracking-wider">Select Matches to Schedule</label>
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => {
+                      const unassignedIds = filteredMatches
+                        .filter(m => !m.start_time || !m.pitch)
+                        .map(m => m.id);
+                      setSelectedBulkMatchIds(unassignedIds);
+                    }}
+                    className="text-[10px] font-bold text-stone-400 hover:text-maroon-700 uppercase transition-colors"
+                  >
+                    Select All
+                  </button>
+                  <button 
+                    onClick={() => setSelectedBulkMatchIds([])}
+                    className="text-[10px] font-bold text-stone-400 hover:text-maroon-700 uppercase transition-colors"
+                  >
+                    Clear
+                  </button>
+                  <span className="text-[10px] font-bold text-maroon-700 bg-maroon-50 px-2 py-1 rounded-full">
+                    {selectedBulkMatchIds.length} Selected
+                  </span>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-48 overflow-y-auto p-1 border border-stone-100 rounded-xl">
+                {filteredMatches.filter(m => !m.start_time || !m.pitch).map(match => (
+                  <label 
+                    key={match.id} 
+                    className={cn(
+                      "flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-all",
+                      selectedBulkMatchIds.includes(match.id) 
+                        ? "bg-maroon-50 border-maroon-200 ring-1 ring-maroon-200" 
+                        : "bg-white border-stone-100 hover:border-stone-200"
+                    )}
+                  >
+                    <input 
+                      type="checkbox"
+                      checked={selectedBulkMatchIds.includes(match.id)}
+                      onChange={() => {
+                        if (selectedBulkMatchIds.includes(match.id)) {
+                          setSelectedBulkMatchIds(selectedBulkMatchIds.filter(id => id !== match.id));
+                        } else {
+                          setSelectedBulkMatchIds([...selectedBulkMatchIds, match.id]);
+                        }
+                      }}
+                      className="hidden"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[10px] font-bold text-stone-400 uppercase truncate">{match.stage}</div>
+                      <div className="text-xs font-bold text-stone-800 truncate">
+                        {(match.team1_name || (match.team1_id === 0 ? 'TBD' : 'Unknown'))} vs {(match.team2_name || (match.team2_id === 0 ? 'TBD' : 'Unknown'))}
+                      </div>
+                    </div>
+                    {selectedBulkMatchIds.includes(match.id) && (
+                      <div className="w-5 h-5 rounded-full bg-maroon-700 text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+                        {selectedBulkMatchIds.indexOf(match.id) + 1}
+                      </div>
+                    )}
+                  </label>
+                ))}
+                {filteredMatches.filter(m => !m.start_time || !m.pitch).length === 0 && (
+                  <div className="col-span-full py-8 text-center text-stone-400 italic text-sm">
+                    No unassigned matches found
+                  </div>
+                )}
+              </div>
             </div>
-            <p className="text-[10px] text-stone-400 italic text-center">
-              Assign times and pitches separately to all {filteredMatches.length} matches.
-            </p>
+
+            <button 
+              onClick={bulkSchedule}
+              disabled={selectedBulkMatchIds.length === 0}
+              className="w-full bg-maroon-700 text-white py-3 rounded-xl font-bold hover:bg-maroon-800 transition-all shadow-lg shadow-maroon-100"
+            >
+              Schedule Selected Matches
+            </button>
           </div>
         </section>
 
         <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
           <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
-            <RefreshCw className="w-5 h-5 text-maroon-700" />
-            Auto-Schedule All Matches
+            <Trophy className="w-5 h-5 text-maroon-700" />
+            Knockout Phase Scheduler
           </h3>
           <div className="space-y-4">
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-500 uppercase">Date</label>
-                <input 
-                  type="date" 
-                  value={autoDate}
-                  onChange={(e) => setAutoDate(e.target.value)}
-                  className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-500 uppercase">Start</label>
-                <input 
-                  type="time" 
-                  value={autoStartTime}
-                  onChange={(e) => setAutoStartTime(e.target.value)}
-                  className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-500 uppercase">Finish</label>
-                <input 
-                  type="time" 
-                  value={autoEndTime}
-                  onChange={(e) => setAutoEndTime(e.target.value)}
-                  className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-500 uppercase">Pitches</label>
-                <select 
-                  value={autoNumPitches}
-                  onChange={(e) => setAutoNumPitches(Number(e.target.value))}
-                  className="w-full bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
-                >
-                  <option value="1">1 Pitch</option>
-                  <option value="2">2 Pitches</option>
-                </select>
-              </div>
+            <div className="grid grid-cols-1 gap-3">
+              {allMatches.filter(m => m.tournament_type === tournamentType && m.stage !== 'round-robin' && m.stage !== 'break').length === 0 && (
+                <div className="text-center py-8 bg-stone-50 rounded-xl border border-dashed border-stone-200">
+                  <p className="text-sm text-stone-400 italic">No knockout matches created yet. Use "Pre-Generate Knockout Slots" below to create them.</p>
+                </div>
+              )}
+              {allMatches.filter(m => m.tournament_type === tournamentType && m.stage !== 'round-robin' && m.stage !== 'break').map(match => (
+                <div key={match.id} className="p-4 bg-stone-50 rounded-xl border border-stone-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-[10px] font-bold text-maroon-700 uppercase bg-maroon-50 px-2 py-0.5 rounded-full">
+                        {match.stage.replace('-', ' ')}
+                      </span>
+                      {(!match.team1_id || !match.team2_id) && (
+                        <span className="text-[10px] font-bold text-amber-600 uppercase bg-amber-50 px-2 py-0.5 rounded-full">
+                          Placeholder
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-sm font-bold text-stone-800 truncate">
+                      {(match.team1_name || (match.team1_id === 0 ? 'TBD' : 'Unknown'))} vs {(match.team2_name || (match.team2_id === 0 ? 'TBD' : 'Unknown'))}
+                    </div>
+                    <div className="flex items-center gap-3 mt-1">
+                      <span className="text-[10px] font-bold text-stone-400 flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        {match.match_date ? `${match.match_date.slice(5)} ${match.start_time}` : match.start_time || 'TBD'}
+                      </span>
+                      <span className="text-[10px] font-bold text-stone-400 flex items-center gap-1">
+                        <MapPin className="w-3 h-3" />
+                        Pitch {match.pitch || 'TBD'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => {
+                        setEditingMatchId(match.id);
+                        setEditScore1(match.score1);
+                        setEditScore2(match.score2);
+                        setEditStatus(match.status);
+                        setEditDate(match.match_date || '2026-03-07');
+                        setEditStartTime(match.start_time || '10:00');
+                        setEditPitch(match.pitch || '1');
+                        setEditUmpire(match.umpire || '');
+                      }}
+                      className="p-2 text-stone-400 hover:text-maroon-700 hover:bg-maroon-50 rounded-lg transition-all"
+                      title="Schedule Match"
+                    >
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                    <button 
+                      onClick={() => deleteMatch(match.id)}
+                      className="p-2 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                      title="Delete Match"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
-            <button 
-              onClick={autoScheduleAll}
-              className="w-full bg-maroon-700 text-white py-3 rounded-xl font-bold hover:bg-maroon-800 transition-all shadow-lg shadow-maroon-100"
-            >
-              Schedule All (Comp & Chill)
-            </button>
-            <p className="text-[10px] text-stone-400 italic text-center">
-              This will distribute all matches across {autoNumPitches} pitches between {autoStartTime} and {autoEndTime}.
-            </p>
           </div>
         </section>
 
@@ -1929,6 +2196,8 @@ const AdminPanel: React.FC<{
                   <option value="">None</option>
                   <option value="1">Pitch 1</option>
                   <option value="2">Pitch 2</option>
+                  <option value="3">Pitch 3</option>
+                  <option value="4">Pitch 4</option>
                 </select>
               </div>
             </div>
@@ -1958,6 +2227,39 @@ const AdminPanel: React.FC<{
               Generate Round Robin
             </button>
             
+            <button 
+              onClick={async () => {
+                const stages = tournamentType === 'competitive' 
+                  ? ['play-off-8v9', 'quarter-final', 'quarter-final', 'quarter-final', 'quarter-final', 'semi-final', 'semi-final', 'final', '3rd-4th-play-off']
+                  : ['semi-final', 'semi-final', 'final', '3rd-4th-play-off'];
+                
+                const matchesToCreate = stages.map(stage => ({
+                  team1_id: 0,
+                  team2_id: 0,
+                  tournament_type: tournamentType,
+                  stage,
+                  status: 'scheduled' as const
+                }));
+
+                if (isLocalMode) {
+                  storage.addMatches(matchesToCreate as any);
+                } else {
+                  for (const m of matchesToCreate) {
+                    await fetch('/api/admin/add-match', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(m)
+                    });
+                  }
+                }
+                onRefresh();
+              }}
+              className="flex items-center justify-center gap-2 bg-stone-800 text-white py-3 rounded-xl font-bold hover:bg-black transition-all text-xs"
+            >
+              <Plus className="w-4 h-4" />
+              Pre-Generate Knockout Slots
+            </button>
+
             {tournamentType === 'competitive' ? (
               <>
                 <button 
@@ -1974,7 +2276,7 @@ const AdminPanel: React.FC<{
                       newMatches.push({ team1_id: allTeams[1].id, team2_id: allTeams[6].id, tournament_type: tournamentType, stage: 'quarter-final', team1_name: allTeams[1].name, team2_name: allTeams[6].name });
                       newMatches.push({ team1_id: allTeams[2].id, team2_id: allTeams[5].id, tournament_type: tournamentType, stage: 'quarter-final', team1_name: allTeams[2].name, team2_name: allTeams[5].name });
                       newMatches.push({ team1_id: allTeams[3].id, team2_id: allTeams[4].id, tournament_type: tournamentType, stage: 'quarter-final', team1_name: allTeams[3].name, team2_name: allTeams[4].name });
-                      storage.addMatches(newMatches);
+                      storage.fillPlaceholderMatches(newMatches);
                     } else {
                       await fetch('/api/generate-knockouts', {
                         method: 'POST',
@@ -2005,7 +2307,7 @@ const AdminPanel: React.FC<{
                         { team1_id: winners[0].id, team2_id: winners[3].id, tournament_type: tournamentType, stage: 'semi-final', team1_name: winners[0].name, team2_name: winners[3].name },
                         { team1_id: winners[1].id, team2_id: winners[2].id, tournament_type: tournamentType, stage: 'semi-final', team1_name: winners[1].name, team2_name: winners[2].name }
                       ];
-                      storage.addMatches(newMatches as any);
+                      storage.fillPlaceholderMatches(newMatches as any);
                     } else {
                       await fetch('/api/generate-next-stage', {
                         method: 'POST',
@@ -2038,7 +2340,7 @@ const AdminPanel: React.FC<{
                       { team1_id: knockoutTeams[0].id, team2_id: knockoutTeams[3].id, tournament_type: tournamentType, stage: 'semi-final', team1_name: knockoutTeams[0].name, team2_name: knockoutTeams[3].name },
                       { team1_id: knockoutTeams[1].id, team2_id: knockoutTeams[2].id, tournament_type: tournamentType, stage: 'semi-final', team1_name: knockoutTeams[1].name, team2_name: knockoutTeams[2].name }
                     ];
-                    storage.addMatches(newMatches as any);
+                    storage.fillPlaceholderMatches(newMatches as any);
                   } else {
                     await fetch('/api/generate-knockouts', {
                       method: 'POST',
@@ -2071,7 +2373,7 @@ const AdminPanel: React.FC<{
                     { team1_id: winners[0].id, team2_id: winners[1].id, tournament_type: tournamentType, stage: 'final', team1_name: winners[0].name, team2_name: winners[1].name },
                     { team1_id: losers[0].id, team2_id: losers[1].id, tournament_type: tournamentType, stage: '3rd-4th-play-off', team1_name: losers[0].name, team2_name: losers[1].name }
                   ];
-                  storage.addMatches(newMatches as any);
+                  storage.fillPlaceholderMatches(newMatches as any);
                 } else {
                   await fetch('/api/generate-next-stage', {
                     method: 'POST',
@@ -2459,6 +2761,8 @@ const AdminPanel: React.FC<{
                     <option value="">TBD</option>
                     <option value="1">Pitch 1</option>
                     <option value="2">Pitch 2</option>
+                    <option value="3">Pitch 3</option>
+                    <option value="4">Pitch 4</option>
                   </select>
                 </div>
               </div>
