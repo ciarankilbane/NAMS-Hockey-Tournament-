@@ -1550,25 +1550,113 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
 
       {/* Pending Submissions */}
       <section className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
-        <div className="px-6 py-4 border-b border-stone-100"><h3 className="text-lg font-bold flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-maroon-700" />Pending Submissions</h3></div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead><tr className="bg-stone-50 text-stone-500 text-xs font-bold uppercase tracking-wider"><th className="px-6 py-3">Match</th><th className="px-6 py-3">Submitted By</th><th className="px-6 py-3">Score</th><th className="px-6 py-3">Action</th></tr></thead>
-            <tbody className="divide-y divide-stone-100">
-              {matches.filter(m => m.status === 'pending').map(match => {
-                const matchSubmissions = submissions.filter(s => s.match_id === match.id);
-                return matchSubmissions.map(sub => (
-                  <tr key={sub.id} className="hover:bg-stone-50">
-                    <td className="px-6 py-4 text-sm font-medium">{match.team1_name} vs {match.team2_name}</td>
-                    <td className="px-6 py-4 text-sm">{teams.find(t => t.id === sub.team_id)?.name}</td>
-                    <td className="px-6 py-4 text-sm font-bold">{sub.score1} - {sub.score2}</td>
-                    <td className="px-6 py-4"><button onClick={() => forceApprove(sub.id)} className="text-xs bg-maroon-700 text-white px-3 py-1 rounded-lg font-bold hover:bg-maroon-800">Force Approve</button></td>
-                  </tr>
-                ));
-              })}
-              {matches.filter(m => m.status === 'pending').length === 0 && <tr><td colSpan={4} className="px-6 py-8 text-center text-stone-400 italic">No pending submissions</td></tr>}
-            </tbody>
-          </table>
+        <div className="px-6 py-4 border-b border-stone-100">
+          <h3 className="text-lg font-bold flex items-center gap-2">
+            <ShieldCheck className="w-5 h-5 text-maroon-700" />
+            Pending Submissions
+            {matches.filter(m => m.status === 'pending').length > 0 && (
+              <span className="ml-2 bg-amber-100 text-amber-700 text-xs font-black px-2 py-0.5 rounded-full">
+                {matches.filter(m => m.status === 'pending').length} pending
+              </span>
+            )}
+          </h3>
+        </div>
+        <div className="divide-y divide-stone-100">
+          {matches.filter(m => m.status === 'pending').map(match => {
+            const matchSubmissions = submissions.filter(s => s.match_id === match.id);
+            const team1Sub = matchSubmissions.find(s => s.team_id === match.team1_id);
+            const team2Sub = matchSubmissions.find(s => s.team_id === match.team2_id);
+            const bothSubmitted = team1Sub && team2Sub;
+            const scoresMatch = bothSubmitted && team1Sub.score1 === team2Sub.score1 && team1Sub.score2 === team2Sub.score2;
+            const scoresConflict = bothSubmitted && !scoresMatch;
+            const waitingFor = !team1Sub ? match.team1_name : !team2Sub ? match.team2_name : null;
+
+            return (
+              <div key={match.id} className={cn(
+                "p-6 space-y-4",
+                scoresConflict ? "bg-red-50" : bothSubmitted ? "bg-amber-50" : "bg-white"
+              )}>
+                {/* Match header */}
+                <div className="flex items-start justify-between gap-4 flex-wrap">
+                  <div>
+                    <div className="font-bold text-stone-900 text-base">{match.team1_name} vs {match.team2_name}</div>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="text-[10px] font-black uppercase text-stone-400">{match.stage.replace(/-/g, ' ')}</span>
+                      {match.start_time && <span className="text-[10px] font-bold text-maroon-700"><Clock className="w-3 h-3 inline mr-0.5" />{match.start_time}</span>}
+                    </div>
+                  </div>
+                  {/* Status badge */}
+                  {scoresConflict && (
+                    <span className="flex items-center gap-1.5 bg-red-100 text-red-700 text-xs font-black px-3 py-1.5 rounded-full border border-red-200">
+                      <AlertCircle className="w-3.5 h-3.5" />
+                      Scores don't match — admin action needed
+                    </span>
+                  )}
+                  {waitingFor && (
+                    <span className="flex items-center gap-1.5 bg-amber-100 text-amber-700 text-xs font-black px-3 py-1.5 rounded-full border border-amber-200">
+                      <Clock className="w-3.5 h-3.5" />
+                      Waiting for {waitingFor} to submit
+                    </span>
+                  )}
+                </div>
+
+                {/* Submissions grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {[
+                    { team: match.team1_name, teamId: match.team1_id, sub: team1Sub },
+                    { team: match.team2_name, teamId: match.team2_id, sub: team2Sub },
+                  ].map(({ team, teamId, sub }) => (
+                    <div key={teamId} className={cn(
+                      "rounded-xl border p-4",
+                      sub ? "bg-white border-stone-200" : "bg-stone-50 border-dashed border-stone-300"
+                    )}>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-black text-stone-500 uppercase">{team}</span>
+                        {sub ? (
+                          <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">
+                            <CheckCircle2 className="w-3 h-3" />Submitted
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-bold text-stone-400 italic">Not submitted yet</span>
+                        )}
+                      </div>
+                      {sub ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-2xl font-black text-stone-900">{sub.score1} – {sub.score2}</span>
+                            {scoresConflict && (
+                              <AlertCircle className="w-4 h-4 text-red-500" />
+                            )}
+                          </div>
+                          {sub.scorers && (() => {
+                            const scorerList = typeof sub.scorers === 'string' ? JSON.parse(sub.scorers) : sub.scorers;
+                            return scorerList.length > 0 ? (
+                              <div className="text-xs text-stone-500">
+                                <span className="font-bold">Scorers: </span>{scorerList.join(', ')}
+                              </div>
+                            ) : null;
+                          })()}
+                          <button
+                            onClick={() => forceApprove(sub.id)}
+                            className="w-full mt-1 text-xs bg-maroon-700 text-white px-3 py-1.5 rounded-lg font-bold hover:bg-maroon-800 transition-all"
+                          >
+                            Force Approve This Score
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="h-10 flex items-center">
+                          <span className="text-sm text-stone-300 font-bold">— awaiting —</span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          {matches.filter(m => m.status === 'pending').length === 0 && (
+            <div className="px-6 py-12 text-center text-stone-400 italic">No pending submissions</div>
+          )}
         </div>
       </section>
     </div>
