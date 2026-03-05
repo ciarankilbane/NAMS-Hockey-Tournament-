@@ -14,13 +14,18 @@ const PORT = process.env.PORT || 3000;
 const isProd = process.env.NODE_ENV === "production";
 const DATABASE_URL = process.env.DATABASE_URL;
 
-// Database Abstraction
 interface DB {
   type: "postgres" | "sqlite";
   all: (sql: string, params?: any[]) => Promise<any[]>;
   get: (sql: string, params?: any[]) => Promise<any>;
   run: (sql: string, params?: any[]) => Promise<{ lastInsertRowid?: number | string; changes?: number }>;
   exec: (sql: string) => Promise<void>;
+}
+
+// CRITICAL: This correctly replaces ? with $1, $2, $3... for PostgreSQL
+function replacePlaceholders(sql: string): string {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
 }
 
 let db: DB;
@@ -48,27 +53,26 @@ async function setupPostgres(url: string) {
   });
 
   try {
-    // Test connection
     const client = await pool.connect();
     client.release();
     console.log("Successfully connected to PostgreSQL");
     db = {
       type: "postgres",
       all: async (sql, params) => {
-        const res = await pool.query(sql.replace(/\?/g, (_, i) => `$${i + 1}`), params);
+        const res = await pool.query(replacePlaceholders(sql), params);
         return res.rows;
       },
       get: async (sql, params) => {
-        const res = await pool.query(sql.replace(/\?/g, (_, i) => `$${i + 1}`), params);
+        const res = await pool.query(replacePlaceholders(sql), params);
         return res.rows[0];
       },
       run: async (sql, params) => {
-        let query = sql.replace(/\?/g, (_, i) => `$${i + 1}`);
+        let query = replacePlaceholders(sql);
         if (query.toLowerCase().includes("insert into")) {
           query += " RETURNING id";
         }
         const res = await pool.query(query, params);
-        return { 
+        return {
           lastInsertRowid: res.rows[0]?.id,
           changes: res.rowCount || 0
         };
@@ -89,7 +93,6 @@ if (DATABASE_URL) {
   setupSQLite();
 }
 
-// Initialize Database
 async function initDb() {
   const schema = `
     CREATE TABLE IF NOT EXISTS teams (
@@ -98,7 +101,6 @@ async function initDb() {
       tournament_type TEXT NOT NULL,
       group_name TEXT
     );
-
     CREATE TABLE IF NOT EXISTS matches (
       id SERIAL PRIMARY KEY,
       team1_id INTEGER REFERENCES teams(id),
@@ -113,14 +115,12 @@ async function initDb() {
       umpire TEXT,
       stage TEXT DEFAULT 'round-robin'
     );
-
     CREATE TABLE IF NOT EXISTS goals (
       id SERIAL PRIMARY KEY,
       match_id INTEGER REFERENCES matches(id),
       team_id INTEGER REFERENCES teams(id),
       player_name TEXT NOT NULL
     );
-
     CREATE TABLE IF NOT EXISTS submissions (
       id SERIAL PRIMARY KEY,
       match_id INTEGER REFERENCES matches(id),
@@ -133,50 +133,52 @@ async function initDb() {
     );
   `;
 
-  // SQLite specific adjustments for initialization if needed
   if (db.type === "sqlite") {
     const sqliteSchema = schema
       .replace(/SERIAL PRIMARY KEY/g, "INTEGER PRIMARY KEY AUTOINCREMENT")
       .replace(/TIMESTAMP DEFAULT CURRENT_TIMESTAMP/g, "DATETIME DEFAULT CURRENT_TIMESTAMP")
-      .replace(/REFERENCES teams\(id\)/g, ""); // SQLite handles FKs differently in CREATE
+      .replace(/REFERENCES teams\(id\)/g, "")
+      .replace(/REFERENCES matches\(id\)/g, "");
     await db.exec(sqliteSchema);
   } else {
     await db.exec(schema);
   }
 
-  // Migrations
   try { await db.run("ALTER TABLE teams ADD COLUMN group_name TEXT"); } catch (e) {}
   try { await db.run("ALTER TABLE matches ADD COLUMN match_date TEXT"); } catch (e) {}
   try { await db.run("ALTER TABLE matches ADD COLUMN umpire TEXT"); } catch (e) {}
 }
 
+async function getFullData() {
+  const teams = await db.all("SELECT * FROM teams");
+  const matches = await db.all(`
+    SELECT m.*, t1.name as team1_name, t2.name as team2_name 
+    FROM matches m
+    LEFT JOIN teams t1 ON m.team1_id = t1.id
+    LEFT JOIN teams t2 ON m.team2_id = t2.id
+  `);
+  const submissions = await db.all("SELECT * FROM submissions");
+  const goals = await db.all(`
+    SELECT g.*, t.name as team_name, t.tournament_type
+    FROM goals g
+    JOIN teams t ON g.team_id = t.id
+  `);
+  return { teams, matches, submissions, goals };
+}
+
 async function startServer() {
   await initDb();
-  
+
   const app = express();
   const httpServer = createServer(app);
   const io = new Server(httpServer);
 
   app.use(express.json());
 
-  // API Routes
   app.get("/api/data", async (req, res) => {
     try {
-      const teams = await db.all("SELECT * FROM teams");
-      const matches = await db.all(`
-        SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-        FROM matches m
-        LEFT JOIN teams t1 ON m.team1_id = t1.id
-        LEFT JOIN teams t2 ON m.team2_id = t2.id
-      `);
-      const submissions = await db.all("SELECT * FROM submissions");
-      const goals = await db.all(`
-        SELECT g.*, t.name as team_name, t.tournament_type 
-        FROM goals g
-        JOIN teams t ON g.team_id = t.id
-      `);
-      res.json({ teams, matches, submissions, goals });
-    } catch (error) {
+      res.json(await getFullData());
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
@@ -184,290 +186,13 @@ async function startServer() {
   app.post("/api/teams", async (req, res) => {
     const { name, tournament_type, group_name } = req.body;
     try {
-      const info = await db.run("INSERT INTO teams (name, tournament_type, group_name) VALUES (?, ?, ?)", [name, tournament_type, group_name]);
-      
-      // Fetch all data to emit a full update
-      const teams = await db.all("SELECT * FROM teams");
-      const matches = await db.all(`
-        SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-        FROM matches m
-        LEFT JOIN teams t1 ON m.team1_id = t1.id
-        LEFT JOIN teams t2 ON m.team2_id = t2.id
-      `);
-      const submissions = await db.all("SELECT * FROM submissions");
-      const goals = await db.all(`
-        SELECT g.*, t.name as team_name, t.tournament_type 
-        FROM goals g
-        JOIN teams t ON g.team_id = t.id
-      `);
-      
-      io.emit("data_updated", { teams, matches, submissions, goals });
+      const info = await db.run(
+        "INSERT INTO teams (name, tournament_type, group_name) VALUES (?, ?, ?)",
+        [name, tournament_type, group_name]
+      );
+      io.emit("data_updated", await getFullData());
       res.json({ id: info.lastInsertRowid, name, tournament_type, group_name });
-    } catch (error) {
-      console.error("Error adding team:", error);
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/matches", async (req, res) => {
-    const { team1_id, team2_id, tournament_type, match_date, start_time, stage } = req.body;
-    
-    const existing = await db.get(`
-      SELECT id FROM matches 
-      WHERE ((team1_id = ? AND team2_id = ?) OR (team1_id = ? AND team2_id = ?))
-      AND tournament_type = ? AND stage = ?
-    `, [team1_id, team2_id, team2_id, team1_id, tournament_type, stage]);
-
-    if (existing) {
-      const match = await db.get(`
-        SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-        FROM matches m
-        LEFT JOIN teams t1 ON m.team1_id = t1.id
-        LEFT JOIN teams t2 ON m.team2_id = t2.id
-        WHERE m.id = ?
-      `, [existing.id]);
-      return res.json(match);
-    }
-
-    const info = await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, match_date, start_time, stage) VALUES (?, ?, ?, ?, ?, ?)", [team1_id, team2_id, tournament_type, match_date, start_time, stage]);
-    const newMatch = await db.get(`
-      SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-      FROM matches m
-      LEFT JOIN teams t1 ON m.team1_id = t1.id
-      LEFT JOIN teams t2 ON m.team2_id = t2.id
-      WHERE m.id = ?
-    `, [info.lastInsertRowid]);
-    io.emit("match_added", newMatch);
-    res.json(newMatch);
-  });
-
-  app.post("/api/submit-score", async (req, res) => {
-    const { match_id, team_id, score1, score2, scorers } = req.body;
-    
-    try {
-      if (DATABASE_URL) {
-        await db.run(`
-          INSERT INTO submissions (match_id, team_id, score1, score2, scorers) 
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT (match_id, team_id) 
-          DO UPDATE SET score1 = EXCLUDED.score1, score2 = EXCLUDED.score2, scorers = EXCLUDED.scorers
-        `, [match_id, team_id, score1, score2, JSON.stringify(scorers)]);
-      } else {
-        await db.run("INSERT OR REPLACE INTO submissions (match_id, team_id, score1, score2, scorers) VALUES (?, ?, ?, ?, ?)", [match_id, team_id, score1, score2, JSON.stringify(scorers)]);
-      }
-      
-      const match = await db.get("SELECT * FROM matches WHERE id = ?", [match_id]);
-      const otherTeamId = match.team1_id === team_id ? match.team2_id : match.team1_id;
-      
-      const otherSubmission = await db.get("SELECT * FROM submissions WHERE match_id = ? AND team_id = ?", [match_id, otherTeamId]);
-      
-      if (otherSubmission) {
-        if (otherSubmission.score1 === score1 && otherSubmission.score2 === score2) {
-          await db.run("UPDATE matches SET score1 = ?, score2 = ?, status = 'completed' WHERE id = ?", [score1, score2, match_id]);
-          
-          await db.run("DELETE FROM goals WHERE match_id = ?", [match_id]);
-          const otherScorers = typeof otherSubmission.scorers === 'string' ? JSON.parse(otherSubmission.scorers) : otherSubmission.scorers;
-          const allScorers = [...scorers, ...otherScorers];
-          
-          for (const name of scorers) {
-            await db.run("INSERT INTO goals (match_id, team_id, player_name) VALUES (?, ?, ?)", [match_id, team_id, name]);
-          }
-          for (const name of otherScorers) {
-            await db.run("INSERT INTO goals (match_id, team_id, player_name) VALUES (?, ?, ?)", [match_id, otherTeamId, name]);
-          }
-
-          io.emit("match_updated", { id: match_id, score1, score2, status: 'completed' });
-          
-          const goals = await db.all(`
-            SELECT g.*, t.name as team_name 
-            FROM goals g
-            JOIN teams t ON g.team_id = t.id
-          `);
-          io.emit("goals_updated", goals);
-        } else {
-          await db.run("UPDATE matches SET status = 'pending' WHERE id = ?", [match_id]);
-          io.emit("match_updated", { id: match_id, status: 'pending' });
-        }
-      } else {
-        await db.run("UPDATE matches SET status = 'pending' WHERE id = ?", [match_id]);
-        io.emit("match_updated", { id: match_id, status: 'pending' });
-      }
-      
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/generate-knockouts", async (req, res) => {
-    const { tournament_type, teams } = req.body;
-    if (teams.length < 2) return res.status(400).json({ error: "Need more teams" });
-
-    const matchesToCreate: any[] = [];
-    if (tournament_type === 'competitive') {
-      if (teams.length >= 9) {
-        matchesToCreate.push({ team1_id: teams[7].id, team2_id: teams[8].id, tournament_type, stage: 'play-off-8v9' });
-      }
-      matchesToCreate.push({ team1_id: teams[0].id, team2_id: 0, tournament_type, stage: 'quarter-final' });
-      matchesToCreate.push({ team1_id: teams[1].id, team2_id: teams[6].id, tournament_type, stage: 'quarter-final' });
-      matchesToCreate.push({ team1_id: teams[2].id, team2_id: teams[5].id, tournament_type, stage: 'quarter-final' });
-      matchesToCreate.push({ team1_id: teams[3].id, team2_id: teams[4].id, tournament_type, stage: 'quarter-final' });
-    } else if (tournament_type === 'chill') {
-      if (teams.length >= 4) {
-        matchesToCreate.push({ team1_id: teams[0].id, team2_id: teams[3].id, tournament_type, stage: 'semi-final' });
-        matchesToCreate.push({ team1_id: teams[1].id, team2_id: teams[2].id, tournament_type, stage: 'semi-final' });
-      }
-    }
-
-    for (const m of matchesToCreate) {
-      const placeholder = await db.get(`
-        SELECT id FROM matches 
-        WHERE tournament_type = ? AND stage = ? 
-        AND (team1_id = 0 OR team1_id IS NULL) 
-        AND (team2_id = 0 OR team2_id IS NULL)
-        AND status = 'scheduled'
-        LIMIT 1
-      `, [m.tournament_type, m.stage]);
-
-      if (placeholder) {
-        await db.run("UPDATE matches SET team1_id = ?, team2_id = ? WHERE id = ?", [m.team1_id, m.team2_id, placeholder.id]);
-      } else {
-        await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)", [m.team1_id, m.team2_id, m.tournament_type, m.stage]);
-      }
-    }
-
-    const allMatches = await db.all(`
-      SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-      FROM matches m 
-      LEFT JOIN teams t1 ON m.team1_id = t1.id 
-      LEFT JOIN teams t2 ON m.team2_id = t2.id 
-      WHERE m.tournament_type = ? AND (m.stage LIKE '%final%' OR m.stage LIKE '%play-off%')
-    `, [tournament_type]);
-    
-    io.emit("data_updated", { teams: await db.all("SELECT * FROM teams"), matches: allMatches, submissions: await db.all("SELECT * FROM submissions"), goals: await db.all("SELECT * FROM goals") });
-    res.json(allMatches);
-  });
-
-  app.post("/api/generate-next-stage", async (req, res) => {
-    const { tournament_type, stage, teams } = req.body;
-    if (teams.length < 2) return res.status(400).json({ error: "Need at least 2 teams" });
-
-    const matchesToCreate: any[] = [];
-    const matchCount = Math.floor(teams.length / 2);
-    for (let i = 0; i < matchCount; i++) {
-      matchesToCreate.push({ team1_id: teams[i*2].id, team2_id: teams[i*2+1].id, tournament_type, stage });
-    }
-
-    if (stage === 'final' && teams.length >= 4) {
-      matchesToCreate.push({ team1_id: teams[2].id, team2_id: teams[3].id, tournament_type, stage: '3rd-4th-play-off' });
-    }
-
-    for (const m of matchesToCreate) {
-      const placeholder = await db.get(`
-        SELECT id FROM matches 
-        WHERE tournament_type = ? AND stage = ? 
-        AND (team1_id = 0 OR team1_id IS NULL) 
-        AND (team2_id = 0 OR team2_id IS NULL)
-        AND status = 'scheduled'
-        LIMIT 1
-      `, [m.tournament_type, m.stage]);
-
-      if (placeholder) {
-        await db.run("UPDATE matches SET team1_id = ?, team2_id = ? WHERE id = ?", [m.team1_id, m.team2_id, placeholder.id]);
-      } else {
-        await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)", [m.team1_id, m.team2_id, m.tournament_type, m.stage]);
-      }
-    }
-
-    const allMatches = await db.all(`
-      SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-      FROM matches m 
-      LEFT JOIN teams t1 ON m.team1_id = t1.id 
-      LEFT JOIN teams t2 ON m.team2_id = t2.id 
-      WHERE m.tournament_type = ?
-    `, [tournament_type]);
-    
-    io.emit("data_updated", { teams: await db.all("SELECT * FROM teams"), matches: allMatches, submissions: await db.all("SELECT * FROM submissions"), goals: await db.all("SELECT * FROM goals") });
-    res.json(allMatches);
-  });
-
-  app.post("/api/admin/force-approve", async (req, res) => {
-    const { submission_id } = req.body;
-    try {
-      const submission = await db.get("SELECT * FROM submissions WHERE id = ?", [submission_id]);
-      if (!submission) return res.status(404).json({ error: "Submission not found" });
-
-      await db.run("UPDATE matches SET score1 = ?, score2 = ?, status = 'completed' WHERE id = ?", [submission.score1, submission.score2, submission.match_id]);
-      
-      const updatedMatch = await db.get(`
-        SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-        FROM matches m
-        LEFT JOIN teams t1 ON m.team1_id = t1.id
-        LEFT JOIN teams t2 ON m.team2_id = t2.id
-        WHERE m.id = ?
-      `, [submission.match_id]);
-
-      io.emit("match_updated", updatedMatch);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.delete("/api/teams/:id", async (req, res) => {
-    const { id } = req.params;
-    try {
-      await db.run("DELETE FROM goals WHERE team_id = ?", [id]);
-      await db.run("DELETE FROM submissions WHERE team_id = ?", [id]);
-      await db.run("DELETE FROM submissions WHERE match_id IN (SELECT id FROM matches WHERE team1_id = ? OR team2_id = ?)", [id, id]);
-      await db.run("DELETE FROM matches WHERE team1_id = ? OR team2_id = ?", [id, id]);
-      await db.run("DELETE FROM teams WHERE id = ?", [id]);
-      
-      const teams = await db.all("SELECT * FROM teams");
-      const matches = await db.all(`
-        SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-        FROM matches m
-        LEFT JOIN teams t1 ON m.team1_id = t1.id
-        LEFT JOIN teams t2 ON m.team2_id = t2.id
-      `);
-      const submissions = await db.all("SELECT * FROM submissions");
-      const goals = await db.all(`
-        SELECT g.*, t.name as team_name, t.tournament_type 
-        FROM goals g
-        JOIN teams t ON g.team_id = t.id
-      `);
-      
-      io.emit("data_updated", { teams, matches, submissions, goals });
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.delete("/api/admin/matches/:id", async (req, res) => {
-    const { id } = req.params;
-    try {
-      await db.run("DELETE FROM goals WHERE match_id = ?", [id]);
-      await db.run("DELETE FROM submissions WHERE match_id = ?", [id]);
-      await db.run("DELETE FROM matches WHERE id = ?", [id]);
-      
-      const teams = await db.all("SELECT * FROM teams");
-      const matches = await db.all(`
-        SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-        FROM matches m
-        LEFT JOIN teams t1 ON m.team1_id = t1.id
-        LEFT JOIN teams t2 ON m.team2_id = t2.id
-      `);
-      const submissions = await db.all("SELECT * FROM submissions");
-      const goals = await db.all(`
-        SELECT g.*, t.name as team_name, t.tournament_type 
-        FROM goals g
-        JOIN teams t ON g.team_id = t.id
-      `);
-      
-      io.emit("data_updated", { teams, matches, submissions, goals });
-      res.json({ success: true });
-    } catch (error) {
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
@@ -476,159 +201,37 @@ async function startServer() {
     const { id, name, group_name } = req.body;
     try {
       await db.run("UPDATE teams SET name = ?, group_name = ? WHERE id = ?", [name, group_name, id]);
-      
-      const teams = await db.all("SELECT * FROM teams");
-      const matches = await db.all(`
-        SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-        FROM matches m
-        LEFT JOIN teams t1 ON m.team1_id = t1.id
-        LEFT JOIN teams t2 ON m.team2_id = t2.id
-      `);
-      const submissions = await db.all("SELECT * FROM submissions");
-      const goals = await db.all(`
-        SELECT g.*, t.name as team_name, t.tournament_type 
-        FROM goals g
-        JOIN teams t ON g.team_id = t.id
-      `);
-      
-      io.emit("data_updated", { teams, matches, submissions, goals });
+      io.emit("data_updated", await getFullData());
       res.json({ success: true });
-    } catch (error) {
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
-  app.post("/api/admin/seed-teams", async (req, res) => {
+  app.post("/api/matches", async (req, res) => {
+    const { team1_id, team2_id, tournament_type, match_date, start_time, stage } = req.body;
     try {
-      // Clear existing data
-      await db.exec("DELETE FROM goals; DELETE FROM submissions; DELETE FROM matches; DELETE FROM teams;");
-      
-      const casualTeams = [
-        { name: "Newcastle 1", group: "Group 1" },
-        { name: "Liverpool 2", group: "Group 1" },
-        { name: "Leicester", group: "Group 1" },
-        { name: "Imperial", group: "Group 1" },
-        { name: "Bristol 2", group: "Group 1" },
-        { name: "Newcastle 3", group: "Group 2" },
-        { name: "Liverpool 1", group: "Group 2" },
-        { name: "Plymouth", group: "Group 2" },
-        { name: "Southampton", group: "Group 2" },
-        { name: "Newcastle 2", group: "Group 3" },
-        { name: "Liverpool 3", group: "Group 3" },
-        { name: "Manchester", group: "Group 3" },
-        { name: "Bristol 1", group: "Group 3" },
-      ];
+      const existing = await db.get(`
+        SELECT id FROM matches 
+        WHERE ((team1_id = ? AND team2_id = ?) OR (team1_id = ? AND team2_id = ?))
+        AND tournament_type = ? AND stage = ?
+      `, [team1_id, team2_id, team2_id, team1_id, tournament_type, stage]);
 
-      const competitiveTeams = [
-        "Bristol 1", "Liverpool", "Bristol 2", "Imperial 1", 
-        "Bristol 3", "Newcastle", "Manchester 1", "Manchester 2", "Imperial 2"
-      ];
-
-      for (const team of casualTeams) {
-        await db.run("INSERT INTO teams (name, tournament_type, group_name) VALUES (?, 'chill', ?)", [team.name, team.group]);
+      if (existing) {
+        const match = await db.get(`
+          SELECT m.*, t1.name as team1_name, t2.name as team2_name 
+          FROM matches m
+          LEFT JOIN teams t1 ON m.team1_id = t1.id
+          LEFT JOIN teams t2 ON m.team2_id = t2.id
+          WHERE m.id = ?
+        `, [existing.id]);
+        return res.json(match);
       }
 
-      for (const name of competitiveTeams) {
-        await db.run("INSERT INTO teams (name, tournament_type) VALUES (?, 'competitive')", [name]);
-      }
-
-      // Fetch teams to get IDs for match seeding
-      const allTeams = await db.all("SELECT * FROM teams");
-      
-      // Seed some initial matches for Chill Tournament (Group 1)
-      const group1Teams = allTeams.filter(t => t.group_name === 'Group 1' && t.tournament_type === 'chill');
-      if (group1Teams.length >= 2) {
-        await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, match_date, start_time, pitch, stage) VALUES (?, ?, 'chill', '2026-03-07', '09:00', '1', 'round-robin')", [group1Teams[0].id, group1Teams[1].id]);
-        if (group1Teams.length >= 4) {
-          await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, match_date, start_time, pitch, stage) VALUES (?, ?, 'chill', '2026-03-07', '09:20', '1', 'round-robin')", [group1Teams[2].id, group1Teams[3].id]);
-        }
-      }
-
-      // Seed some initial matches for Competitive Tournament
-      const compTeams = allTeams.filter(t => t.tournament_type === 'competitive');
-      if (compTeams.length >= 2) {
-        await db.run("INSERT INTO matches (team1_id, team2_id, tournament_type, match_date, start_time, pitch, stage) VALUES (?, ?, 'competitive', '2026-03-07', '09:10', '1', 'round-robin')", [compTeams[0].id, compTeams[1].id]);
-      }
-
-      // Final data fetch for emission
-      const teams = await db.all("SELECT * FROM teams");
-      const matches = await db.all(`
-        SELECT m.*, t1.name as team1_name, t2.name as team2_name 
-        FROM matches m
-        LEFT JOIN teams t1 ON m.team1_id = t1.id
-        LEFT JOIN teams t2 ON m.team2_id = t2.id
-      `);
-      const submissions = await db.all("SELECT * FROM submissions");
-      const goals = await db.all(`
-        SELECT g.*, t.name as team_name, t.tournament_type 
-        FROM goals g
-        JOIN teams t ON g.team_id = t.id
-      `);
-      
-      io.emit("data_updated", { teams, matches, submissions, goals });
-      res.json({ success: true, count: teams.length });
-    } catch (error) {
-      console.error("Error seeding teams:", error);
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/admin/update-goal", async (req, res) => {
-    const { id, player_name } = req.body;
-    try {
-      await db.run("UPDATE goals SET player_name = ? WHERE id = ?", [player_name, id]);
-      const goals = await db.all(`
-        SELECT g.*, t.name as team_name, t.tournament_type 
-        FROM goals g
-        JOIN teams t ON g.team_id = t.id
-      `);
-      io.emit("goals_updated", goals);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.delete("/api/admin/goals/:id", async (req, res) => {
-    const { id } = req.params;
-    try {
-      await db.run("DELETE FROM goals WHERE id = ?", [id]);
-      const goals = await db.all(`
-        SELECT g.*, t.name as team_name, t.tournament_type 
-        FROM goals g
-        JOIN teams t ON g.team_id = t.id
-      `);
-      io.emit("goals_updated", goals);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/admin/add-goal", async (req, res) => {
-    const { match_id, team_id, player_name } = req.body;
-    try {
-      await db.run("INSERT INTO goals (match_id, team_id, player_name) VALUES (?, ?, ?)", [match_id, team_id, player_name]);
-      const goals = await db.all(`
-        SELECT g.*, t.name as team_name, t.tournament_type 
-        FROM goals g
-        JOIN teams t ON g.team_id = t.id
-      `);
-      io.emit("goals_updated", goals);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/admin/add-match", async (req, res) => {
-    const { team1_id, team2_id, tournament_type, match_date, start_time, pitch, stage, umpire, status } = req.body;
-    try {
-      const info = await db.run(`
-        INSERT INTO matches (team1_id, team2_id, tournament_type, match_date, start_time, pitch, stage, umpire, status) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [team1_id, team2_id, tournament_type, match_date, start_time, pitch, stage, umpire, status || 'scheduled']);
-      
+      const info = await db.run(
+        "INSERT INTO matches (team1_id, team2_id, tournament_type, match_date, start_time, stage) VALUES (?, ?, ?, ?, ?, ?)",
+        [team1_id, team2_id, tournament_type, match_date, start_time, stage]
+      );
       const newMatch = await db.get(`
         SELECT m.*, t1.name as team1_name, t2.name as team2_name 
         FROM matches m
@@ -636,10 +239,30 @@ async function startServer() {
         LEFT JOIN teams t2 ON m.team2_id = t2.id
         WHERE m.id = ?
       `, [info.lastInsertRowid]);
-      
       io.emit("match_added", newMatch);
       res.json(newMatch);
-    } catch (error) {
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/admin/add-match", async (req, res) => {
+    const { team1_id, team2_id, tournament_type, match_date, start_time, pitch, stage, umpire, status } = req.body;
+    try {
+      const info = await db.run(
+        "INSERT INTO matches (team1_id, team2_id, tournament_type, match_date, start_time, pitch, stage, umpire, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [team1_id, team2_id, tournament_type, match_date, start_time, pitch, stage, umpire, status || 'scheduled']
+      );
+      const newMatch = await db.get(`
+        SELECT m.*, t1.name as team1_name, t2.name as team2_name 
+        FROM matches m
+        LEFT JOIN teams t1 ON m.team1_id = t1.id
+        LEFT JOIN teams t2 ON m.team2_id = t2.id
+        WHERE m.id = ?
+      `, [info.lastInsertRowid]);
+      io.emit("match_added", newMatch);
+      res.json(newMatch);
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
@@ -664,7 +287,7 @@ async function startServer() {
         umpire !== undefined ? umpire : current.umpire,
         match_id
       ]);
-      
+
       const updatedMatch = await db.get(`
         SELECT m.*, t1.name as team1_name, t2.name as team2_name 
         FROM matches m
@@ -672,12 +295,241 @@ async function startServer() {
         LEFT JOIN teams t2 ON m.team2_id = t2.id
         WHERE m.id = ?
       `, [match_id]);
-      
-      if (updatedMatch) {
-        io.emit("match_updated", updatedMatch);
-      }
+
+      if (updatedMatch) io.emit("match_updated", updatedMatch);
       res.json({ success: true });
-    } catch (error) {
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/admin/matches/:id", async (req, res) => {
+    const { id } = req.params;
+    try {
+      await db.run("DELETE FROM goals WHERE match_id = ?", [id]);
+      await db.run("DELETE FROM submissions WHERE match_id = ?", [id]);
+      await db.run("DELETE FROM matches WHERE id = ?", [id]);
+      io.emit("data_updated", await getFullData());
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/submit-score", async (req, res) => {
+    const { match_id, team_id, score1, score2, scorers } = req.body;
+    try {
+      if (db.type === "postgres") {
+        await db.run(`
+          INSERT INTO submissions (match_id, team_id, score1, score2, scorers) 
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT (match_id, team_id) 
+          DO UPDATE SET score1 = EXCLUDED.score1, score2 = EXCLUDED.score2, scorers = EXCLUDED.scorers
+        `, [match_id, team_id, score1, score2, JSON.stringify(scorers)]);
+      } else {
+        await db.run(
+          "INSERT OR REPLACE INTO submissions (match_id, team_id, score1, score2, scorers) VALUES (?, ?, ?, ?, ?)",
+          [match_id, team_id, score1, score2, JSON.stringify(scorers)]
+        );
+      }
+
+      const match = await db.get("SELECT * FROM matches WHERE id = ?", [match_id]);
+      const otherTeamId = match.team1_id === team_id ? match.team2_id : match.team1_id;
+      const otherSubmission = await db.get(
+        "SELECT * FROM submissions WHERE match_id = ? AND team_id = ?",
+        [match_id, otherTeamId]
+      );
+
+      if (otherSubmission) {
+        if (otherSubmission.score1 === score1 && otherSubmission.score2 === score2) {
+          await db.run(
+            "UPDATE matches SET score1 = ?, score2 = ?, status = 'completed' WHERE id = ?",
+            [score1, score2, match_id]
+          );
+          await db.run("DELETE FROM goals WHERE match_id = ?", [match_id]);
+
+          const otherScorers = typeof otherSubmission.scorers === 'string'
+            ? JSON.parse(otherSubmission.scorers) : otherSubmission.scorers;
+
+          for (const name of scorers) {
+            await db.run(
+              "INSERT INTO goals (match_id, team_id, player_name) VALUES (?, ?, ?)",
+              [match_id, team_id, name]
+            );
+          }
+          for (const name of otherScorers) {
+            await db.run(
+              "INSERT INTO goals (match_id, team_id, player_name) VALUES (?, ?, ?)",
+              [match_id, otherTeamId, name]
+            );
+          }
+
+          io.emit("match_updated", { id: match_id, score1, score2, status: 'completed' });
+          const goals = await db.all(`
+            SELECT g.*, t.name as team_name, t.tournament_type
+            FROM goals g JOIN teams t ON g.team_id = t.id
+          `);
+          io.emit("goals_updated", goals);
+        } else {
+          await db.run("UPDATE matches SET status = 'pending' WHERE id = ?", [match_id]);
+          io.emit("match_updated", { id: match_id, status: 'pending' });
+        }
+      } else {
+        await db.run("UPDATE matches SET status = 'pending' WHERE id = ?", [match_id]);
+        io.emit("match_updated", { id: match_id, status: 'pending' });
+      }
+
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/admin/update-goal", async (req, res) => {
+    const { id, player_name } = req.body;
+    try {
+      await db.run("UPDATE goals SET player_name = ? WHERE id = ?", [player_name, id]);
+      const goals = await db.all(`
+        SELECT g.*, t.name as team_name, t.tournament_type
+        FROM goals g JOIN teams t ON g.team_id = t.id
+      `);
+      io.emit("goals_updated", goals);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/admin/goals/:id", async (req, res) => {
+    const { id } = req.params;
+    try {
+      await db.run("DELETE FROM goals WHERE id = ?", [id]);
+      const goals = await db.all(`
+        SELECT g.*, t.name as team_name, t.tournament_type
+        FROM goals g JOIN teams t ON g.team_id = t.id
+      `);
+      io.emit("goals_updated", goals);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/admin/add-goal", async (req, res) => {
+    const { match_id, team_id, player_name } = req.body;
+    try {
+      await db.run(
+        "INSERT INTO goals (match_id, team_id, player_name) VALUES (?, ?, ?)",
+        [match_id, team_id, player_name]
+      );
+      const goals = await db.all(`
+        SELECT g.*, t.name as team_name, t.tournament_type
+        FROM goals g JOIN teams t ON g.team_id = t.id
+      `);
+      io.emit("goals_updated", goals);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/generate-knockouts", async (req, res) => {
+    const { tournament_type, teams } = req.body;
+    if (teams.length < 2) return res.status(400).json({ error: "Need more teams" });
+
+    try {
+      const matchesToCreate: any[] = [];
+      if (tournament_type === 'competitive') {
+        if (teams.length >= 9) matchesToCreate.push({ team1_id: teams[7].id, team2_id: teams[8].id, stage: 'play-off-8v9' });
+        matchesToCreate.push({ team1_id: teams[0].id, team2_id: 0, stage: 'quarter-final' });
+        matchesToCreate.push({ team1_id: teams[1].id, team2_id: teams[6].id, stage: 'quarter-final' });
+        matchesToCreate.push({ team1_id: teams[2].id, team2_id: teams[5].id, stage: 'quarter-final' });
+        matchesToCreate.push({ team1_id: teams[3].id, team2_id: teams[4].id, stage: 'quarter-final' });
+      } else if (tournament_type === 'chill' && teams.length >= 4) {
+        matchesToCreate.push({ team1_id: teams[0].id, team2_id: teams[3].id, stage: 'semi-final' });
+        matchesToCreate.push({ team1_id: teams[1].id, team2_id: teams[2].id, stage: 'semi-final' });
+      }
+
+      for (const m of matchesToCreate) {
+        await db.run(
+          "INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)",
+          [m.team1_id, m.team2_id, tournament_type, m.stage]
+        );
+      }
+
+      io.emit("data_updated", await getFullData());
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/generate-next-stage", async (req, res) => {
+    const { tournament_type, stage, teams } = req.body;
+    if (teams.length < 2) return res.status(400).json({ error: "Need at least 2 teams" });
+
+    try {
+      const matchCount = Math.floor(teams.length / 2);
+      for (let i = 0; i < matchCount; i++) {
+        await db.run(
+          "INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)",
+          [teams[i * 2].id, teams[i * 2 + 1].id, tournament_type, stage]
+        );
+      }
+      if (stage === 'final' && teams.length >= 4) {
+        await db.run(
+          "INSERT INTO matches (team1_id, team2_id, tournament_type, stage) VALUES (?, ?, ?, ?)",
+          [teams[2].id, teams[3].id, tournament_type, '3rd-4th-play-off']
+        );
+      }
+
+      io.emit("data_updated", await getFullData());
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/admin/force-approve", async (req, res) => {
+    const { submission_id } = req.body;
+    try {
+      const submission = await db.get("SELECT * FROM submissions WHERE id = ?", [submission_id]);
+      if (!submission) return res.status(404).json({ error: "Submission not found" });
+
+      await db.run(
+        "UPDATE matches SET score1 = ?, score2 = ?, status = 'completed' WHERE id = ?",
+        [submission.score1, submission.score2, submission.match_id]
+      );
+
+      const updatedMatch = await db.get(`
+        SELECT m.*, t1.name as team1_name, t2.name as team2_name 
+        FROM matches m
+        LEFT JOIN teams t1 ON m.team1_id = t1.id
+        LEFT JOIN teams t2 ON m.team2_id = t2.id
+        WHERE m.id = ?
+      `, [submission.match_id]);
+
+      io.emit("match_updated", updatedMatch);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/teams/:id", async (req, res) => {
+    const { id } = req.params;
+    try {
+      await db.run("DELETE FROM goals WHERE team_id = ?", [id]);
+      await db.run("DELETE FROM submissions WHERE team_id = ?", [id]);
+      await db.run(
+        "DELETE FROM submissions WHERE match_id IN (SELECT id FROM matches WHERE team1_id = ? OR team2_id = ?)",
+        [id, id]
+      );
+      await db.run("DELETE FROM matches WHERE team1_id = ? OR team2_id = ?", [id, id]);
+      await db.run("DELETE FROM teams WHERE id = ?", [id]);
+      io.emit("data_updated", await getFullData());
+      res.json({ success: true });
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
@@ -685,26 +537,31 @@ async function startServer() {
   app.post("/api/admin/add-break", async (req, res) => {
     const { tournament_type, match_date, start_time, pitch, stage } = req.body;
     try {
-      const info = await db.run("INSERT INTO matches (tournament_type, match_date, start_time, pitch, stage, status) VALUES (?, ?, ?, ?, ?, 'completed')", [tournament_type, match_date, start_time, pitch, stage]);
-      const newMatch = await db.get(`
-        SELECT m.*, NULL as team1_name, NULL as team2_name 
-        FROM matches m
-        WHERE m.id = ?
-      `, [info.lastInsertRowid]);
+      const info = await db.run(
+        "INSERT INTO matches (tournament_type, match_date, start_time, pitch, stage, status) VALUES (?, ?, ?, ?, ?, 'completed')",
+        [tournament_type, match_date, start_time, pitch, stage]
+      );
+      const newMatch = await db.get(
+        "SELECT m.*, NULL as team1_name, NULL as team2_name FROM matches m WHERE m.id = ?",
+        [info.lastInsertRowid]
+      );
       io.emit("match_added", newMatch);
       res.json(newMatch);
-    } catch (error) {
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   app.post("/api/reset", async (req, res) => {
-    await db.exec("DELETE FROM submissions; DELETE FROM matches; DELETE FROM teams; DELETE FROM goals;");
-    io.emit("data_reset");
-    res.json({ success: true });
+    try {
+      await db.exec("DELETE FROM submissions; DELETE FROM goals; DELETE FROM matches; DELETE FROM teams;");
+      io.emit("data_reset");
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
-  // Serve static files in production
   if (isProd) {
     app.use(express.static(path.join(__dirname, "dist")));
     app.get("*", (req, res) => {
