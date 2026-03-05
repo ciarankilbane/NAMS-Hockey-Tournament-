@@ -131,5 +131,32 @@ export const storage = {
 
   reset: () => {
     storage.saveData(getInitialData());
+  },
+
+  deleteMatch: (id: number) => {
+    const data = storage.getData();
+    data.matches = data.matches.filter(m => m.id !== id);
+    data.submissions = data.submissions.filter(s => s.match_id !== id);
+    data.goals = data.goals.filter(g => g.match_id !== id);
+    storage.saveData(data);
+  },
+
+  updateGoal: (id: number, playerName: string) => {
+    const data = storage.getData();
+    data.goals = data.goals.map(g => g.id === id ? { ...g, player_name: playerName } : g);
+    storage.saveData(data);
+  },
+
+  deleteGoal: (id: number) => {
+    const data = storage.getData();
+    data.goals = data.goals.filter(g => g.id !== id);
+    storage.saveData(data);
+  },
+
+  addGoal: (goal: Omit<Goal, 'id'>) => {
+    const data = storage.getData();
+    const newGoal = { ...goal, id: Date.now() + Math.random() };
+    data.goals.push(newGoal);
+    storage.saveData(data);
   }
 };

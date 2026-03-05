@@ -30,6 +30,7 @@ export interface Goal {
   team_id: number;
   player_name: string;
   team_name?: string;
+  tournament_type?: TournamentType;
 }
 
 export interface Submission {
