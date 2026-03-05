@@ -807,9 +807,9 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
   const [matchSearch, setMatchSearch] = useState('');
 
   // Goal management state
-  const [editingGoalId, setEditingGoalId] = useState<number | null>(null);
+  const [editingGoalId, setEditingGoalId] = useState<string | null>(null);
   const [editGoalName, setEditGoalName] = useState('');
-  const [confirmDeleteGoalId, setConfirmDeleteGoalId] = useState<number | null>(null);
+  const [confirmDeleteGoalId, setConfirmDeleteGoalId] = useState<string | null>(null);
   const [newGoalMatchId, setNewGoalMatchId] = useState<number | null>(null);
   const [newGoalTeamId, setNewGoalTeamId] = useState<number | null>(null);
   const [newGoalPlayerName, setNewGoalPlayerName] = useState('');
@@ -962,7 +962,6 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
     try {
       if (isLocalMode) { storage.updateGoal(goalId, newName); }
       else { const res = await fetch('/api/admin/update-goal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: goalId, player_name: newName }) }); if (!res.ok) throw new Error('Failed'); }
-      setEditingGoalId(null); onRefresh();
     } catch (err: any) { alert(`Error: ${err.message}`); }
   };
 
@@ -1006,10 +1005,11 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
       : ['semi-final', 'semi-final', 'final', '3rd-4th-play-off'];
 
     for (const stage of stages) {
-      const matchData = { team1_id: 0, team2_id: 0, tournament_type: tournamentType, stage, status: 'scheduled' };
+      const matchData = { team1_id: null, team2_id: null, tournament_type: tournamentType, stage, status: 'scheduled' };
       if (isLocalMode) { storage.addMatches([matchData as any]); }
       else {
-        await fetch('/api/admin/add-match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(matchData) });
+        const res = await fetch('/api/admin/add-match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(matchData) });
+        if (!res.ok) { const err = await res.json(); console.error('Failed to create slot:', err); alert(`Error creating ${stage} slot: ${err.error}`); return; }
       }
     }
     onRefresh();
@@ -1345,21 +1345,23 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
               <div key={group.key} className="flex items-center gap-4 p-4 bg-stone-50 rounded-xl border border-stone-100 group/row hover:border-stone-200 transition-all">
                 {/* Player name - editable */}
                 <div className="flex-1 min-w-0">
-                  {editingGoalId === group.goals[0].id ? (
-                    <div className="flex items-center gap-2">
+                  {editingGoalId === group.key ? (
+                    <div className="flex items-center gap-2 flex-wrap">
                       <input
                         type="text"
                         value={editGoalName}
                         onChange={e => setEditGoalName(e.target.value)}
-                        className="flex-1 bg-white border border-maroon-300 rounded-lg px-3 py-1.5 text-sm font-bold focus:ring-2 focus:ring-maroon-500 outline-none"
+                        className="flex-1 min-w-[120px] bg-white border border-maroon-300 rounded-lg px-3 py-1.5 text-sm font-bold focus:ring-2 focus:ring-maroon-500 outline-none"
                         autoFocus
+                        onKeyDown={e => { if (e.key === 'Enter') { group.goals.forEach(g => updateGoal(g.id, editGoalName)); } }}
                       />
                       <button
                         onClick={async () => {
-                          // Update ALL goals for this player to new name
                           for (const goal of group.goals) {
                             await updateGoal(goal.id, editGoalName);
                           }
+                          setEditingGoalId(null);
+                          onRefresh();
                         }}
                         className="bg-maroon-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-maroon-800"
                       >Save</button>
@@ -1403,20 +1405,20 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
                   </div>
                 </div>
 
-                {/* Actions */}
-                <div className="flex items-center gap-2 opacity-0 group-hover/row:opacity-100 transition-opacity">
-                  {editingGoalId !== group.goals[0].id && (
-                    <button onClick={() => { setEditingGoalId(group.goals[0].id); setEditGoalName(group.playerName); }} className="p-2 text-stone-400 hover:text-maroon-700 hover:bg-maroon-50 rounded-lg transition-all" title="Edit name">
+                {/* Actions - always visible */}
+                <div className="flex items-center gap-2 shrink-0">
+                  {editingGoalId !== group.key && (
+                    <button onClick={() => { setEditingGoalId(group.key); setEditGoalName(group.playerName); }} className="p-2 text-stone-400 hover:text-maroon-700 hover:bg-maroon-50 rounded-lg transition-all" title="Edit name">
                       <Edit2 className="w-4 h-4" />
                     </button>
                   )}
-                  {confirmDeleteGoalId === group.goals[0].id ? (
+                  {confirmDeleteGoalId === group.key ? (
                     <div className="flex items-center gap-2">
-                      <button onClick={() => deleteAllGoalsForPlayer(group.goals.map(g => g.id))} className="bg-red-600 text-white text-[10px] font-bold px-3 py-1.5 rounded-lg">Delete All {group.goals.length} goal{group.goals.length > 1 ? 's' : ''}?</button>
+                      <button onClick={() => deleteAllGoalsForPlayer(group.goals.map(g => g.id))} className="bg-red-600 text-white text-[10px] font-bold px-3 py-1.5 rounded-lg whitespace-nowrap">Yes, delete {group.goals.length} goal{group.goals.length > 1 ? 's' : ''}</button>
                       <button onClick={() => setConfirmDeleteGoalId(null)} className="bg-stone-200 text-stone-600 text-[10px] font-bold px-3 py-1.5 rounded-lg">Cancel</button>
                     </div>
                   ) : (
-                    <button onClick={() => setConfirmDeleteGoalId(group.goals[0].id)} className="p-2 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all" title="Delete all goals for this player">
+                    <button onClick={() => setConfirmDeleteGoalId(group.key)} className="p-2 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all" title="Delete player">
                       <Trash2 className="w-4 h-4" />
                     </button>
                   )}
@@ -1572,4 +1574,3 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
     </div>
   );
 }
-
