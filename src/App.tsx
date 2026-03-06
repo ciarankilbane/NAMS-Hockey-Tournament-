@@ -916,7 +916,6 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
       }
     }
     if (errors.length > 0) alert(`Some matches failed:\n${errors.join('\n')}`);
-    else alert(`Successfully created ${created} matches!`);
     onRefresh();
   };
 
