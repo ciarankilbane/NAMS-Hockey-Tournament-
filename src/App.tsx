@@ -798,6 +798,9 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
   const [newTeamName, setNewTeamName] = useState('');
   const [newUmpireName, setNewUmpireName] = useState('');
   const [confirmDeleteUmpireId, setConfirmDeleteUmpireId] = useState<number | null>(null);
+  const [extraMatchTeam1, setExtraMatchTeam1] = useState<number | null>(null);
+  const [extraMatchTeam2, setExtraMatchTeam2] = useState<number | null>(null);
+  const [extraMatchGroup, setExtraMatchGroup] = useState<string>('');
   const [newTeamGroup, setNewTeamGroup] = useState('Group 1');
   const [editingMatchId, setEditingMatchId] = useState<number | null>(null);
   const [editScore1, setEditScore1] = useState(0);
@@ -837,13 +840,6 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
   const [editTeamName, setEditTeamName] = useState('');
   const [editTeamGroup, setEditTeamGroup] = useState('');
 
-  const [newMatchTeam1, setNewMatchTeam1] = useState<number | null>(null);
-  const [newMatchTeam2, setNewMatchTeam2] = useState<number | null>(null);
-  const [newMatchDate, setNewMatchDate] = useState('2026-03-07');
-  const [newMatchTime, setNewMatchTime] = useState('');
-  const [newMatchPitch, setNewMatchPitch] = useState('1');
-  const [newMatchStage, setNewMatchStage] = useState('round-robin');
-  const [newMatchUmpire, setNewMatchUmpire] = useState('');
 
   const [confirmDeleteMatchId, setConfirmDeleteMatchId] = useState<number | null>(null);
 
@@ -871,13 +867,7 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
     return Object.values(groups).sort((a, b) => b.goals.length - a.goals.length || a.playerName.localeCompare(b.playerName));
   }, [goals]);
 
-  const addMatch = async () => {
-    if (newMatchTeam1 === null || newMatchTeam2 === null || !newMatchTime) return;
-    const matchData = { team1_id: newMatchTeam1, team2_id: newMatchTeam2, tournament_type: tournamentType, match_date: newMatchDate, start_time: newMatchTime, pitch: newMatchPitch, stage: newMatchStage, umpire: newMatchUmpire, status: 'scheduled' };
-    if (isLocalMode) { storage.addMatches([matchData as any]); onRefresh(); }
-    else { await fetch('/api/admin/add-match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(matchData) }); }
-    setNewMatchTeam1(null); setNewMatchTeam2(null); setNewMatchTime('');
-  };
+
 
   const updateTeam = async (id: number, name: string, group_name: string) => {
     if (isLocalMode) { storage.updateTeam(id, { name, group_name }); onRefresh(); }
@@ -1033,6 +1023,20 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
     } catch (err: any) { alert(`Error: ${err.message}`); }
   };
 
+  const addExtraMatch = async () => {
+    if (extraMatchTeam1 === null || extraMatchTeam2 === null || extraMatchTeam1 === extraMatchTeam2) return;
+    if (isLocalMode) {
+      const t1 = filteredTeams.find(t => t.id === extraMatchTeam1);
+      const t2 = filteredTeams.find(t => t.id === extraMatchTeam2);
+      storage.addMatch({ team1_id: extraMatchTeam1, team2_id: extraMatchTeam2, tournament_type: tournamentType, start_time: 'TBD', stage: 'round-robin', team1_name: t1?.name, team2_name: t2?.name });
+    } else {
+      const res = await fetch('/api/admin/add-match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ team1_id: extraMatchTeam1, team2_id: extraMatchTeam2, tournament_type: tournamentType, stage: 'round-robin', status: 'scheduled' }) });
+      if (!res.ok) { const err = await res.json(); alert(err.error); return; }
+    }
+    setExtraMatchTeam1(null); setExtraMatchTeam2(null);
+    onRefresh();
+  };
+
   const addUmpire = async () => {
     if (!newUmpireName.trim()) return;
     try {
@@ -1162,70 +1166,7 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
           </div>
         </section>
 
-        {/* Add Match */}
-        <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
-          <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><Plus className="w-5 h-5 text-maroon-700" />Add Manual Match ({tournamentType})</h3>
-          <div className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-500 uppercase">Team 1</label>
-                <select value={newMatchTeam1 || ''} onChange={e => setNewMatchTeam1(Number(e.target.value))} className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
-                  <option value="">Select Team 1</option>
-                  <option value="0">TBD / Placeholder</option>
-                  {filteredTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-500 uppercase">Team 2</label>
-                <select value={newMatchTeam2 || ''} onChange={e => setNewMatchTeam2(Number(e.target.value))} className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
-                  <option value="">Select Team 2</option>
-                  <option value="0">TBD / Placeholder</option>
-                  {filteredTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                </select>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-500 uppercase">Date</label>
-                <select value={newMatchDate} onChange={e => { setNewMatchDate(e.target.value); setNewMatchTime(''); }} className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
-                  <option value="2026-03-07">Sat Mar 7</option>
-                  <option value="2026-03-08">Sun Mar 8</option>
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-500 uppercase">Time Slot</label>
-                <select value={newMatchTime} onChange={e => setNewMatchTime(e.target.value)} className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
-                  <option value="">Select Slot</option>
-                  {TOURNAMENT_SLOTS[newMatchDate]?.[tournamentType].map(slot => <option key={slot} value={slot}>{slot}</option>)}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-500 uppercase">Pitch</label>
-                <select value={newMatchPitch} onChange={e => setNewMatchPitch(e.target.value)} className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
-                  <option value="1">Pitch 1</option><option value="2">Pitch 2</option><option value="3">Pitch 3</option><option value="4">Pitch 4</option>
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-500 uppercase">Stage</label>
-                <select value={newMatchStage} onChange={e => setNewMatchStage(e.target.value)} className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
-                  <option value="round-robin">Round Robin</option>
-                  <option value="quarter-final">Quarter Final</option>
-                  <option value="semi-final">Semi Final</option>
-                  <option value="final">Final</option>
-                  <option value="3rd-4th-play-off">3rd/4th Play-off</option>
-                </select>
-              </div>
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] font-bold text-stone-500 uppercase">Umpire (Optional)</label>
-              <select value={newMatchUmpire} onChange={e => setNewMatchUmpire(e.target.value)} className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
-                <option value="">-- No umpire --</option>
-                {umpires.map(u => <option key={u.id} value={u.name}>{u.name}</option>)}
-              </select>
-            </div>
-            <button onClick={addMatch} disabled={newMatchTeam1 === null || newMatchTeam2 === null || !newMatchTime} className="w-full bg-maroon-700 text-white py-3 rounded-xl font-bold hover:bg-maroon-800 transition-all disabled:opacity-50">Add Match</button>
-          </div>
-        </section>
+
 
         {/* Bulk Scheduler */}
         <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
@@ -1379,7 +1320,56 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
             </button>
           )}
         </div>
-        <div className="mt-6 pt-6 border-t border-stone-100 flex flex-wrap items-center justify-end gap-4">
+        {/* Extra match adder */}
+        <div className="mt-6 pt-6 border-t border-stone-100">
+          <div className="flex flex-col sm:flex-row items-start sm:items-end gap-3">
+            <div className="flex-1 space-y-1">
+              <label className="text-[10px] font-bold text-stone-500 uppercase tracking-wider">Add Extra Round Robin Match</label>
+              <div className="flex flex-wrap gap-2 items-center">
+                <select
+                  value={extraMatchGroup}
+                  onChange={e => { setExtraMatchGroup(e.target.value); setExtraMatchTeam1(null); setExtraMatchTeam2(null); }}
+                  className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                >
+                  <option value="">Filter by group</option>
+                  {[...new Set(filteredTeams.map(t => t.group_name).filter(Boolean))].sort().map(g => (
+                    <option key={g} value={g}>{g}</option>
+                  ))}
+                </select>
+                <select
+                  value={extraMatchTeam1 ?? ''}
+                  onChange={e => setExtraMatchTeam1(Number(e.target.value) || null)}
+                  className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                >
+                  <option value="">Team 1</option>
+                  {(extraMatchGroup ? filteredTeams.filter(t => t.group_name === extraMatchGroup) : filteredTeams)
+                    .filter(t => t.id !== extraMatchTeam2)
+                    .map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+                <span className="text-stone-400 font-bold text-sm">vs</span>
+                <select
+                  value={extraMatchTeam2 ?? ''}
+                  onChange={e => setExtraMatchTeam2(Number(e.target.value) || null)}
+                  className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500"
+                >
+                  <option value="">Team 2</option>
+                  {(extraMatchGroup ? filteredTeams.filter(t => t.group_name === extraMatchGroup) : filteredTeams)
+                    .filter(t => t.id !== extraMatchTeam1)
+                    .map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+                <button
+                  onClick={addExtraMatch}
+                  disabled={!extraMatchTeam1 || !extraMatchTeam2 || extraMatchTeam1 === extraMatchTeam2}
+                  className="bg-maroon-700 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-maroon-800 transition-all disabled:opacity-40 whitespace-nowrap"
+                >
+                  <Plus className="w-4 h-4 inline mr-1" />Add Match
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 pt-4 border-t border-stone-100 flex flex-wrap items-center justify-end gap-4">
           {showResetConfirm ? (
             <div className="flex items-center gap-3">
               <span className="text-xs font-bold text-red-600 uppercase">Reset {tournamentType} data?</span>
