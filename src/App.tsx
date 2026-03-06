@@ -11,6 +11,16 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+function formatDate(dateStr: string | undefined | null): string {
+  if (!dateStr) return 'TBD';
+  if (dateStr === '2026-03-07') return '7 Mar';
+  if (dateStr === '2026-03-08') return '8 Mar';
+  // Fallback: parse YYYY-MM-DD
+  const [, month, day] = dateStr.split('-');
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${parseInt(day)} ${months[parseInt(month) - 1]}`;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'live' | 'umpire' | 'report' | 'admin'>('dashboard');
   const [tournamentType, setTournamentType] = useState<TournamentType>('competitive');
@@ -448,7 +458,7 @@ const MatchCard: React.FC<{ match: Match, isFavorite?: boolean }> = ({ match, is
             {!isBreak && <span className={cn("text-[8px] font-black uppercase px-1.5 py-0.5 rounded border", match.tournament_type === 'competitive' ? "bg-maroon-50 text-maroon-700 border-maroon-100" : "bg-stone-100 text-stone-600 border-stone-200")}>{match.tournament_type}</span>}
           </div>
           <div className="flex items-center gap-2 mt-0.5">
-            <span className="text-[10px] font-bold text-maroon-700 flex items-center gap-1"><Clock className="w-3 h-3" />{match.match_date ? `${match.match_date.slice(5)} ${match.start_time}` : match.start_time || 'TBD'}</span>
+            <span className="text-[10px] font-bold text-maroon-700 flex items-center gap-1"><Clock className="w-3 h-3" />{match.match_date ? `${formatDate(match.match_date)} ${match.start_time}` : match.start_time || 'TBD'}</span>
             {match.pitch && <span className="text-[10px] font-bold text-stone-500 flex items-center gap-1"><ChevronRight className="w-3 h-3" />Pitch {match.pitch}</span>}
             {match.umpire && <span className="text-[10px] font-medium text-stone-400 flex items-center gap-1 border-l border-stone-200 pl-2">Umpire: {match.umpire}</span>}
           </div>
@@ -1196,7 +1206,7 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
                   </div>
                   <div className="text-sm font-bold text-stone-800 truncate">{match.team1_name || 'TBD'} vs {match.team2_name || 'TBD'}</div>
                   <div className="flex items-center gap-3 mt-1">
-                    <span className="text-[10px] font-bold text-stone-400"><Clock className="w-3 h-3 inline mr-1" />{match.match_date ? `${match.match_date.slice(5)} ${match.start_time}` : match.start_time || 'TBD'}</span>
+                    <span className="text-[10px] font-bold text-stone-400"><Clock className="w-3 h-3 inline mr-1" />{match.match_date ? `${formatDate(match.match_date)} ${match.start_time}` : match.start_time || 'TBD'}</span>
                     <span className="text-[10px] font-bold text-stone-400"><MapPin className="w-3 h-3 inline mr-1" />Pitch {match.pitch || 'TBD'}</span>
                   </div>
                 </div>
@@ -1459,7 +1469,7 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex flex-col">
-                      <div className="flex items-center gap-1.5 text-maroon-700 font-bold text-sm"><Clock className="w-3 h-3" />{match.match_date ? `${match.match_date.slice(5)} ${match.start_time}` : match.start_time || 'TBD'}</div>
+                      <div className="flex items-center gap-1.5 text-maroon-700 font-bold text-sm"><Clock className="w-3 h-3" />{match.match_date ? `${formatDate(match.match_date)} ${match.start_time}` : match.start_time || 'TBD'}</div>
                       <div className="flex items-center gap-1.5 text-stone-500 text-xs"><MapPin className="w-3 h-3" />Pitch {match.pitch || 'TBD'}</div>
                     </div>
                   </td>
