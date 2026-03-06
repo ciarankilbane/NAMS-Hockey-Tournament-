@@ -892,19 +892,31 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
 
   const generateSchedule = async () => {
     if (filteredTeams.length < 2) return;
-    // Get all unique group names from the actual teams rather than hardcoding A/B/C
     const groups = [...new Set(filteredTeams.map(t => t.group_name).filter(Boolean))];
-    // If no groups assigned, treat all teams as one group
     if (groups.length === 0) groups.push('');
+    let created = 0;
+    let errors: string[] = [];
     for (const g of groups) {
       const groupTeams = g ? filteredTeams.filter(t => t.group_name === g) : filteredTeams;
       for (let i = 0; i < groupTeams.length; i++) {
         for (let j = i + 1; j < groupTeams.length; j++) {
-          if (isLocalMode) { storage.addMatch({ team1_id: groupTeams[i].id, team2_id: groupTeams[j].id, tournament_type: tournamentType, start_time: 'TBD', stage: 'round-robin', team1_name: groupTeams[i].name, team2_name: groupTeams[j].name }); }
-          else { await fetch('/api/matches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ team1_id: groupTeams[i].id, team2_id: groupTeams[j].id, tournament_type: tournamentType, start_time: 'TBD', stage: 'round-robin' }) }); }
+          if (isLocalMode) {
+            storage.addMatch({ team1_id: groupTeams[i].id, team2_id: groupTeams[j].id, tournament_type: tournamentType, start_time: 'TBD', stage: 'round-robin', team1_name: groupTeams[i].name, team2_name: groupTeams[j].name });
+            created++;
+          } else {
+            const res = await fetch('/api/admin/add-match', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ team1_id: groupTeams[i].id, team2_id: groupTeams[j].id, tournament_type: tournamentType, stage: 'round-robin', status: 'scheduled' })
+            });
+            if (res.ok) created++;
+            else { const err = await res.json(); errors.push(`${groupTeams[i].name} vs ${groupTeams[j].name}: ${err.error}`); }
+          }
         }
       }
     }
+    if (errors.length > 0) alert(`Some matches failed:\n${errors.join('\n')}`);
+    else alert(`Successfully created ${created} matches!`);
     onRefresh();
   };
 
