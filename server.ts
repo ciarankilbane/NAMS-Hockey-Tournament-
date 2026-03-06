@@ -558,9 +558,20 @@ async function startServer() {
   });
 
   app.post("/api/reset", async (req, res) => {
+    const { tournament_type } = req.body;
     try {
-      await db.exec("DELETE FROM submissions; DELETE FROM goals; DELETE FROM matches; DELETE FROM teams;");
-      io.emit("data_reset");
+      if (tournament_type) {
+        // Only delete data for the specified tournament type
+        await db.run("DELETE FROM goals WHERE team_id IN (SELECT id FROM teams WHERE tournament_type = ?)", [tournament_type]);
+        await db.run("DELETE FROM submissions WHERE match_id IN (SELECT id FROM matches WHERE tournament_type = ?)", [tournament_type]);
+        await db.run("DELETE FROM matches WHERE tournament_type = ?", [tournament_type]);
+        await db.run("DELETE FROM teams WHERE tournament_type = ?", [tournament_type]);
+      } else {
+        // Full reset (fallback)
+        await db.exec("DELETE FROM submissions; DELETE FROM goals; DELETE FROM matches; DELETE FROM teams;");
+      }
+      const data = await getFullData();
+      io.emit("data_updated", data);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
