@@ -892,9 +892,12 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
 
   const generateSchedule = async () => {
     if (filteredTeams.length < 2) return;
-    const groups = ['A', 'B', 'C'];
+    // Get all unique group names from the actual teams rather than hardcoding A/B/C
+    const groups = [...new Set(filteredTeams.map(t => t.group_name).filter(Boolean))];
+    // If no groups assigned, treat all teams as one group
+    if (groups.length === 0) groups.push('');
     for (const g of groups) {
-      const groupTeams = filteredTeams.filter(t => t.group_name === g);
+      const groupTeams = g ? filteredTeams.filter(t => t.group_name === g) : filteredTeams;
       for (let i = 0; i < groupTeams.length; i++) {
         for (let j = i + 1; j < groupTeams.length; j++) {
           if (isLocalMode) { storage.addMatch({ team1_id: groupTeams[i].id, team2_id: groupTeams[j].id, tournament_type: tournamentType, start_time: 'TBD', stage: 'round-robin', team1_name: groupTeams[i].name, team2_name: groupTeams[j].name }); }
