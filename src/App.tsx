@@ -914,7 +914,7 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
   const resetData = async () => {
     setIsResetting(true);
     if (isLocalMode) { storage.reset(); }
-    else { await fetch('/api/reset', { method: 'POST' }); }
+    else { await fetch('/api/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tournament_type: tournamentType }) }); }
     setIsResetting(false); onRefresh();
   };
 
@@ -1300,7 +1300,7 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
         <div className="mt-6 pt-6 border-t border-stone-100 flex flex-wrap items-center justify-end gap-4">
           {showResetConfirm ? (
             <div className="flex items-center gap-3">
-              <span className="text-xs font-bold text-red-600 uppercase">Reset everything?</span>
+              <span className="text-xs font-bold text-red-600 uppercase">Reset {tournamentType} data?</span>
               <button onClick={() => { resetData(); setShowResetConfirm(false); }} className="bg-red-600 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-red-700 transition-all">Yes, Reset</button>
               <button onClick={() => setShowResetConfirm(false)} className="bg-stone-100 text-stone-600 px-4 py-2 rounded-xl font-bold text-sm hover:bg-stone-200 transition-all">Cancel</button>
             </div>
