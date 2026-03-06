@@ -131,6 +131,10 @@ async function initDb() {
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(match_id, team_id)
     );
+    CREATE TABLE IF NOT EXISTS umpires (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE
+    );
   `;
 
   if (db.type === "sqlite") {
@@ -147,6 +151,14 @@ async function initDb() {
   try { await db.run("ALTER TABLE teams ADD COLUMN group_name TEXT"); } catch (e) {}
   try { await db.run("ALTER TABLE matches ADD COLUMN match_date TEXT"); } catch (e) {}
   try { await db.run("ALTER TABLE matches ADD COLUMN umpire TEXT"); } catch (e) {}
+  // Create umpires table if it doesn't exist yet (migration-safe)
+  try {
+    if (db.type === "sqlite") {
+      await db.exec("CREATE TABLE IF NOT EXISTS umpires (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)");
+    } else {
+      await db.exec("CREATE TABLE IF NOT EXISTS umpires (id SERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE)");
+    }
+  } catch (e) {}
 }
 
 async function getFullData() {
@@ -163,7 +175,8 @@ async function getFullData() {
     FROM goals g
     JOIN teams t ON g.team_id = t.id
   `);
-  return { teams, matches, submissions, goals };
+  const umpires = await db.all("SELECT * FROM umpires ORDER BY name ASC");
+  return { teams, matches, submissions, goals, umpires };
 }
 
 async function startServer() {
@@ -178,6 +191,41 @@ async function startServer() {
   app.get("/api/data", async (req, res) => {
     try {
       res.json(await getFullData());
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Umpire endpoints
+  app.get("/api/umpires", async (req, res) => {
+    try {
+      const umpires = await db.all("SELECT * FROM umpires ORDER BY name ASC");
+      res.json(umpires);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/umpires", async (req, res) => {
+    const { name } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: "Name required" });
+    try {
+      const info = await db.run("INSERT INTO umpires (name) VALUES (?)", [name.trim()]);
+      res.json({ id: info.lastInsertRowid, name: name.trim() });
+    } catch (error: any) {
+      if (error.message?.includes("UNIQUE") || error.message?.includes("unique")) {
+        res.status(400).json({ error: "Umpire already exists" });
+      } else {
+        res.status(500).json({ error: error.message });
+      }
+    }
+  });
+
+  app.delete("/api/umpires/:id", async (req, res) => {
+    const { id } = req.params;
+    try {
+      await db.run("DELETE FROM umpires WHERE id = ?", [id]);
+      res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
