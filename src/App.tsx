@@ -24,7 +24,7 @@ function formatDate(dateStr: string | undefined | null): string {
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'live' | 'umpire' | 'report' | 'admin'>('dashboard');
   const [tournamentType, setTournamentType] = useState<TournamentType>('competitive');
-  const [data, setData] = useState<AppData & { goals: Goal[] }>({ teams: [], matches: [], submissions: [], goals: [] });
+  const [data, setData] = useState<AppData & { goals: Goal[], umpires: {id: number, name: string}[] }>({ teams: [], matches: [], submissions: [], goals: [], umpires: [] });
   const [loading, setLoading] = useState(true);
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
   const [adminPassword, setAdminPassword] = useState('');
@@ -242,8 +242,15 @@ export default function App() {
                 <div className="bg-white p-8 rounded-2xl border border-stone-200 shadow-sm">
                   <h2 className="text-xl font-bold mb-6 flex items-center gap-2"><Users className="w-6 h-6 text-maroon-700" />Umpire Portal</h2>
                   <div className="space-y-4">
-                    <input type="text" placeholder="Your Full Name" value={umpireName} onChange={(e) => setUmpireName(e.target.value)} className="w-full bg-stone-50 border border-stone-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-maroon-500 outline-none" />
-                    <button onClick={() => { if (umpireName.trim()) setIsUmpireAuthenticated(true); }} className="w-full bg-maroon-700 text-white font-bold py-3 rounded-xl hover:bg-maroon-800 transition-all">View My Matches</button>
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-stone-500 uppercase tracking-wider">Select Your Name</label>
+                      <select value={umpireName} onChange={(e) => setUmpireName(e.target.value)} className="w-full bg-stone-50 border border-stone-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-maroon-500 outline-none">
+                        <option value="">-- Select your name --</option>
+                        {data.umpires.map(u => <option key={u.id} value={u.name}>{u.name}</option>)}
+                      </select>
+                      {data.umpires.length === 0 && <p className="text-xs text-stone-400 italic">No umpires have been added yet. Ask the admin to add umpires first.</p>}
+                    </div>
+                    <button onClick={() => { if (umpireName.trim()) setIsUmpireAuthenticated(true); }} disabled={!umpireName} className="w-full bg-maroon-700 text-white font-bold py-3 rounded-xl hover:bg-maroon-800 transition-all disabled:opacity-50">View My Matches</button>
                   </div>
                 </div>
               ) : (
@@ -408,7 +415,7 @@ export default function App() {
                   </div>
                 </div>
               ) : (
-                <AdminPanel teams={data.teams} matches={data.matches} tournamentType={tournamentType} standings={standings} bestSecondPlace={bestSecondPlace} submissions={data.submissions} goals={data.goals} onRefresh={fetchData} isLocalMode={isLocalMode} />
+                <AdminPanel teams={data.teams} matches={data.matches} tournamentType={tournamentType} standings={standings} bestSecondPlace={bestSecondPlace} submissions={data.submissions} goals={data.goals} umpires={data.umpires} onRefresh={fetchData} isLocalMode={isLocalMode} />
               )}
             </motion.div>
           )}
@@ -785,10 +792,12 @@ const TOURNAMENT_SLOTS: Record<string, Record<'chill' | 'competitive', string[]>
   '2026-03-08': { chill: ['11:30','11:50','12:10','12:30','12:50','13:10','13:30'], competitive: ['12:00','12:25','12:50','13:15','13:40'] }
 };
 
-function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace, submissions, goals, onRefresh, isLocalMode }: {
-  teams: Team[], matches: Match[], tournamentType: TournamentType, standings: Record<string, any[]>, bestSecondPlace: any, submissions: Submission[], goals: Goal[], onRefresh: () => void, isLocalMode: boolean
+function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace, submissions, goals, umpires, onRefresh, isLocalMode }: {
+  teams: Team[], matches: Match[], tournamentType: TournamentType, standings: Record<string, any[]>, bestSecondPlace: any, submissions: Submission[], goals: Goal[], umpires: {id: number, name: string}[], onRefresh: () => void, isLocalMode: boolean
 }) {
   const [newTeamName, setNewTeamName] = useState('');
+  const [newUmpireName, setNewUmpireName] = useState('');
+  const [confirmDeleteUmpireId, setConfirmDeleteUmpireId] = useState<number | null>(null);
   const [newTeamGroup, setNewTeamGroup] = useState('Group 1');
   const [editingMatchId, setEditingMatchId] = useState<number | null>(null);
   const [editScore1, setEditScore1] = useState(0);
@@ -842,10 +851,11 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
   const filteredMatches = matches.filter(m => m.tournament_type === tournamentType);
   const allMatches = matches;
   const searchedMatches = allMatches.filter(m =>
-    m.team1_name?.toLowerCase().includes(matchSearch.toLowerCase()) ||
+    m.tournament_type === tournamentType &&
+    (m.team1_name?.toLowerCase().includes(matchSearch.toLowerCase()) ||
     m.team2_name?.toLowerCase().includes(matchSearch.toLowerCase()) ||
     m.umpire?.toLowerCase().includes(matchSearch.toLowerCase()) ||
-    m.stage?.toLowerCase().includes(matchSearch.toLowerCase())
+    m.stage?.toLowerCase().includes(matchSearch.toLowerCase()))
   );
 
   // Group goals by player+team for the management UI
@@ -1023,6 +1033,22 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
     } catch (err: any) { alert(`Error: ${err.message}`); }
   };
 
+  const addUmpire = async () => {
+    if (!newUmpireName.trim()) return;
+    try {
+      const res = await fetch('/api/umpires', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newUmpireName.trim() }) });
+      if (!res.ok) { const err = await res.json(); alert(err.error); return; }
+      setNewUmpireName(''); onRefresh();
+    } catch (err: any) { alert(err.message); }
+  };
+
+  const deleteUmpire = async (id: number) => {
+    try {
+      await fetch(`/api/umpires/${id}`, { method: 'DELETE' });
+      setConfirmDeleteUmpireId(null); onRefresh();
+    } catch (err: any) { alert(err.message); }
+  };
+
   const preGenerateKnockouts = async () => {
     const stages = tournamentType === 'competitive'
       ? ['play-off-8v9', 'quarter-final', 'quarter-final', 'quarter-final', 'quarter-final', 'semi-final', 'semi-final', 'final', '3rd-4th-play-off']
@@ -1057,6 +1083,41 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
   return (
     <div className="space-y-8">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        {/* Umpire Management */}
+        <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6 md:col-span-2">
+          <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><Users className="w-5 h-5 text-maroon-700" />Umpire Management</h3>
+          <div className="flex flex-col sm:flex-row gap-2 mb-6">
+            <input
+              type="text"
+              placeholder="Umpire Full Name"
+              value={newUmpireName}
+              onChange={(e) => setNewUmpireName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') addUmpire(); }}
+              className="flex-1 bg-stone-50 border border-stone-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-maroon-500 outline-none"
+            />
+            <button onClick={addUmpire} disabled={!newUmpireName.trim()} className="bg-maroon-700 text-white px-6 py-2 rounded-xl font-bold text-sm hover:bg-maroon-800 transition-all disabled:opacity-50 whitespace-nowrap">Add Umpire</button>
+          </div>
+          {umpires.length === 0 ? (
+            <p className="text-center text-stone-400 text-sm italic py-4">No umpires added yet</p>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+              {umpires.map(umpire => (
+                <div key={umpire.id} className="flex items-center justify-between p-3 bg-stone-50 rounded-lg border border-stone-100">
+                  <span className="font-medium text-sm text-stone-800 truncate">{umpire.name}</span>
+                  {confirmDeleteUmpireId === umpire.id ? (
+                    <div className="flex items-center gap-1 ml-2 shrink-0">
+                      <button onClick={() => deleteUmpire(umpire.id)} className="bg-red-600 text-white text-[10px] font-bold px-2 py-1 rounded">Yes</button>
+                      <button onClick={() => setConfirmDeleteUmpireId(null)} className="bg-stone-200 text-stone-600 text-[10px] font-bold px-2 py-1 rounded">No</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setConfirmDeleteUmpireId(umpire.id)} className="ml-2 shrink-0 p-1 text-stone-300 hover:text-red-500 transition-all"><Trash2 className="w-3.5 h-3.5" /></button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
         {/* Team Management */}
         <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
           <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><Users className="w-5 h-5 text-maroon-700" />Team Management ({tournamentType})</h3>
@@ -1154,6 +1215,13 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
                   <option value="3rd-4th-play-off">3rd/4th Play-off</option>
                 </select>
               </div>
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-stone-500 uppercase">Umpire (Optional)</label>
+              <select value={newMatchUmpire} onChange={e => setNewMatchUmpire(e.target.value)} className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
+                <option value="">-- No umpire --</option>
+                {umpires.map(u => <option key={u.id} value={u.name}>{u.name}</option>)}
+              </select>
             </div>
             <button onClick={addMatch} disabled={newMatchTeam1 === null || newMatchTeam2 === null || !newMatchTime} className="w-full bg-maroon-700 text-white py-3 rounded-xl font-bold hover:bg-maroon-800 transition-all disabled:opacity-50">Add Match</button>
           </div>
@@ -1549,7 +1617,10 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
               <div className="space-y-2">
                 <label className="text-xs font-bold text-stone-500 uppercase">Umpire</label>
                 <div className="flex gap-2">
-                  <input type="text" value={editUmpire} onChange={(e) => setEditUmpire(e.target.value)} placeholder="Enter umpire's full name" className="flex-1 px-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:ring-2 focus:ring-maroon-500 outline-none" />
+                  <select value={editUmpire} onChange={(e) => setEditUmpire(e.target.value)} className="flex-1 px-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:ring-2 focus:ring-maroon-500 outline-none">
+                    <option value="">-- No umpire assigned --</option>
+                    {umpires.map(u => <option key={u.id} value={u.name}>{u.name}</option>)}
+                  </select>
                   {editUmpire && <button onClick={() => setEditUmpire('')} className="px-3 bg-stone-100 text-stone-500 rounded-xl hover:bg-stone-200 text-xs font-bold">Clear</button>}
                 </div>
               </div>
