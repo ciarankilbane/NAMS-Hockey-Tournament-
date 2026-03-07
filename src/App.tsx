@@ -494,6 +494,8 @@ function LiveDashboard({ matches }: { matches: Match[] }) {
   const [now, setNow] = useState(new Date());
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 30000); return () => clearInterval(t); }, []);
 
+  const toMins = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+
   const venueInfo = useMemo(() => {
     const today = now.toISOString().split('T')[0];
     const matchDates = Array.from(new Set(matches.map(m => m.match_date).filter(Boolean))).sort();
@@ -503,24 +505,36 @@ function LiveDashboard({ matches }: { matches: Match[] }) {
     return { name: 'Tournament Venue', pitches: ['1', '2'], details: '' };
   }, [matches, now]);
 
-  const liveMatchesByPitch = useMemo(() => {
-    const currentTimeStr = now.toTimeString().slice(0, 5);
+  // One match per pitch: currently playing, or next up if nothing in progress
+  const currentMatchByPitch = useMemo(() => {
+    const nowMins = toMins(now.toTimeString().slice(0, 5));
     const currentDateStr = now.toISOString().split('T')[0];
-    const live = matches.filter(m => {
-      if (!m.team1_id) return false;
-      if (m.status === 'completed') return false;
-      if (m.status === 'pending') return true;
-      if (!m.start_time) return false;
-      if (m.match_date && m.match_date !== currentDateStr) return false;
-      const matchTime = new Date(`2024-01-01T${m.start_time}:00`);
-      const currentTime = new Date(`2024-01-01T${currentTimeStr}:00`);
-      const diff = (currentTime.getTime() - matchTime.getTime()) / 60000;
-      return diff >= 0 && diff < 30;
+    const map: Record<string, { match: Match, isLive: boolean } | null> = {};
+
+    venueInfo.pitches.forEach(pitch => {
+      const candidates = matches.filter(m =>
+        m.pitch === pitch &&
+        m.team1_id &&
+        m.start_time &&
+        m.status !== 'completed' &&
+        (!m.match_date || m.match_date === currentDateStr)
+      );
+
+      // In progress: started within last 30 mins
+      const live = candidates.find(m => {
+        const s = toMins(m.start_time!);
+        return nowMins >= s && nowMins < s + 30;
+      });
+      if (live) { map[pitch] = { match: live, isLive: true }; return; }
+
+      // Next upcoming
+      const next = candidates
+        .filter(m => toMins(m.start_time!) > nowMins)
+        .sort((a, b) => toMins(a.start_time!) - toMins(b.start_time!))[0];
+      map[pitch] = next ? { match: next, isLive: false } : null;
     });
-    const map: Record<string, Match[]> = {};
-    live.forEach(m => { if (m.pitch) { if (!map[m.pitch]) map[m.pitch] = []; map[m.pitch].push(m); } });
     return map;
-  }, [matches, now]);
+  }, [matches, now, venueInfo.pitches]);
 
   const upcomingMatches = useMemo(() => {
     const currentTimeStr = now.toTimeString().slice(0, 5);
@@ -529,18 +543,16 @@ function LiveDashboard({ matches }: { matches: Match[] }) {
       if (!m.start_time || m.status === 'completed' || !m.team1_id) return false;
       if (m.match_date && m.match_date > currentDateStr) return true;
       if (m.match_date && m.match_date < currentDateStr) return false;
-      const matchTime = new Date(`2024-01-01T${m.start_time}:00`);
-      const currentTime = new Date(`2024-01-01T${currentTimeStr}:00`);
-      return matchTime.getTime() > currentTime.getTime();
-    }).sort((a, b) => (a.match_date || '').localeCompare(b.match_date || '') || (a.start_time || '').localeCompare(b.start_time || '')).slice(0, 4);
+      return toMins(m.start_time) > toMins(currentTimeStr);
+    }).sort((a, b) => (a.match_date || '').localeCompare(b.match_date || '') || (a.start_time || '').localeCompare(b.start_time || '')).slice(0, 6);
   }, [matches, now]);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2 mb-1"><MapPin className="w-4 h-4 text-maroon-700" /><span className="text-xs font-black uppercase tracking-widest text-maroon-700">{venueInfo.name}</span></div>
-          <h2 className="text-3xl font-black text-stone-900 tracking-tight">Live Matches</h2>
+          <h2 className="text-3xl font-black text-stone-900 tracking-tight">Live</h2>
           <p className="text-stone-500 font-medium">{venueInfo.details || 'Real-time updates from all pitches'}</p>
         </div>
         <div className="bg-white px-4 py-2 rounded-xl border border-stone-200 shadow-sm flex items-center gap-3">
@@ -554,36 +566,45 @@ function LiveDashboard({ matches }: { matches: Match[] }) {
           <h2 className="text-white font-black uppercase tracking-widest flex items-center gap-2"><span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />Pitch Status</h2>
           <span className="text-maroon-300 text-[10px] font-bold uppercase">Live Updates</span>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-x divide-y divide-stone-100">
+        <div className={cn("grid divide-stone-100", venueInfo.pitches.length === 2 ? "grid-cols-2 divide-x" : "grid-cols-2 lg:grid-cols-4 divide-x divide-y")}>
           {venueInfo.pitches.map(pitch => {
-            const pitchMatches = liveMatchesByPitch[pitch] || [];
+            const entry = currentMatchByPitch[pitch];
             const isUpper = (pitch === '1' || pitch === '2') && venueInfo.name.includes('Coombe');
             const isLower = (pitch === '3' || pitch === '4') && venueInfo.name.includes('Coombe');
             return (
-              <div key={pitch} className="p-6 flex flex-col items-center text-center relative">
-                {isUpper && <div className="absolute top-0 left-0 right-0 bg-stone-100 py-1 text-[8px] font-black uppercase tracking-tighter text-stone-400">Upper Astro</div>}
-                {isLower && <div className="absolute top-0 left-0 right-0 bg-stone-100 py-1 text-[8px] font-black uppercase tracking-tighter text-stone-400">Lower Astro</div>}
-                <span className="text-[10px] font-black text-stone-400 uppercase tracking-widest mb-4 mt-2">Pitch {pitch}</span>
-                {pitchMatches.length > 0 ? (
-                  <div className="space-y-4 w-full">
-                    {pitchMatches.map(match => (
-                      <div key={match.id} className="p-2 rounded-lg bg-stone-50 border border-stone-100 relative overflow-hidden">
-                        <div className={cn("absolute top-0 left-0 w-1 h-full", match.tournament_type === 'competitive' ? "bg-maroon-600" : "bg-stone-400")} />
-                        <div className="flex flex-col">
-                          <span className="text-[8px] font-black uppercase text-stone-400 mb-1">{match.tournament_type}</span>
-                          <span className="text-sm font-bold text-maroon-800 leading-tight">{match.team1_name}</span>
-                          <span className="text-[8px] font-black text-stone-300 my-0.5">VS</span>
-                          <span className="text-sm font-bold text-maroon-800 leading-tight">{match.team2_name}</span>
-                        </div>
+              <div key={pitch} className="flex flex-col relative">
+                {isUpper && <div className="bg-stone-100 py-1 text-center text-[8px] font-black uppercase tracking-tighter text-stone-400">Upper Astro</div>}
+                {isLower && <div className="bg-stone-100 py-1 text-center text-[8px] font-black uppercase tracking-tighter text-stone-400">Lower Astro</div>}
+                <div className="p-6 flex flex-col items-center text-center flex-1">
+                  <div className="flex items-center gap-2 mb-4">
+                    <span className="text-[10px] font-black text-stone-400 uppercase tracking-widest">Pitch {pitch}</span>
+                    {entry?.isLive && <span className="flex items-center gap-1 text-[9px] font-black text-red-500 uppercase"><span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse inline-block" />Live</span>}
+                  </div>
+                  {entry ? (
+                    <div className="w-full rounded-xl border overflow-hidden" style={{ borderColor: entry.isLive ? '#991b1b' : '#e7e5e4' }}>
+                      <div className={cn("px-3 py-1.5 flex items-center justify-between", entry.isLive ? "bg-maroon-900" : "bg-stone-100")}>
+                        <span className={cn("text-[10px] font-black uppercase", entry.isLive ? "text-maroon-300" : "text-stone-400")}>{entry.match.tournament_type}</span>
+                        <span className={cn("text-[10px] font-black", entry.isLive ? "text-white" : "text-stone-500")}>
+                          {entry.match.start_time}
+                          {!entry.isLive && <span className="ml-1 text-stone-400">— up next</span>}
+                        </span>
                       </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="py-4 flex flex-col items-center">
-                    <div className="w-10 h-10 rounded-full bg-emerald-50 flex items-center justify-center mb-2"><div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" /></div>
-                    <span className="text-xs font-black text-emerald-600 uppercase tracking-widest">Available</span>
-                  </div>
-                )}
+                      <div className="p-4 space-y-2 bg-white">
+                        <div className="text-sm font-black text-stone-900 leading-tight">{entry.match.team1_name}</div>
+                        <div className="text-[10px] font-black text-stone-300 uppercase tracking-widest">vs</div>
+                        <div className="text-sm font-black text-stone-900 leading-tight">{entry.match.team2_name}</div>
+                        {entry.match.umpire && (
+                          <div className="pt-2 border-t border-stone-100 text-[10px] text-stone-400 font-medium">Umpire: {entry.match.umpire}</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-2">
+                      <div className="w-10 h-10 rounded-full bg-emerald-50 flex items-center justify-center"><div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" /></div>
+                      <span className="text-xs font-black text-emerald-600 uppercase tracking-widest">Available</span>
+                    </div>
+                  )}
+                </div>
               </div>
             );
           })}
@@ -593,17 +614,21 @@ function LiveDashboard({ matches }: { matches: Match[] }) {
       {upcomingMatches.length > 0 && (
         <section className="bg-black rounded-2xl p-6 shadow-xl border border-stone-800">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-white font-black uppercase tracking-widest flex items-center gap-2"><Clock className="w-4 h-4 text-maroon-500" />Coming Up Next</h2>
-            <span className="text-stone-500 text-[10px] font-bold uppercase">Next 4 Matches</span>
+            <h2 className="text-white font-black uppercase tracking-widest flex items-center gap-2"><Clock className="w-4 h-4 text-maroon-500" />Coming Up</h2>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {upcomingMatches.map(match => (
-              <div key={match.id} className="bg-white/5 rounded-xl p-3 border border-white/5">
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-[10px] font-bold text-maroon-500">{match.start_time}</span>
-                  <span className="text-[10px] font-bold text-stone-500">P{match.pitch}</span>
+              <div key={match.id} className="bg-white/5 rounded-xl p-3 border border-white/5 flex items-center gap-3">
+                <div className="text-center shrink-0">
+                  <div className="text-maroon-400 font-black text-sm">{match.start_time}</div>
+                  <div className="text-stone-500 text-[10px] font-bold">P{match.pitch}</div>
                 </div>
-                <div className="text-white text-xs font-bold truncate">{match.team1_name} vs {match.team2_name}</div>
+                <div className="min-w-0">
+                  <div className="text-white text-xs font-bold truncate">{match.team1_name}</div>
+                  <div className="text-stone-500 text-[9px] font-black uppercase my-0.5">vs</div>
+                  <div className="text-white text-xs font-bold truncate">{match.team2_name}</div>
+                </div>
+                <span className={cn("ml-auto shrink-0 text-[9px] font-black uppercase px-1.5 py-0.5 rounded", match.tournament_type === 'competitive' ? "bg-maroon-900 text-maroon-300" : "bg-stone-800 text-stone-400")}>{match.tournament_type === 'competitive' ? 'Comp' : 'Chill'}</span>
               </div>
             ))}
           </div>
@@ -1635,103 +1660,68 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
 
       {/* Pending Submissions */}
       <section className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
-        <div className="px-6 py-4 border-b border-stone-100">
+        <div className="px-6 py-4 border-b border-stone-100 flex items-center justify-between">
           <h3 className="text-lg font-bold flex items-center gap-2">
             <ShieldCheck className="w-5 h-5 text-maroon-700" />
-            Pending Submissions
-            {matches.filter(m => m.status === 'pending').length > 0 && (
-              <span className="ml-2 bg-amber-100 text-amber-700 text-xs font-black px-2 py-0.5 rounded-full">
-                {matches.filter(m => m.status === 'pending').length} pending
-              </span>
-            )}
+            Pending Approvals
           </h3>
+          {matches.filter(m => m.status === 'pending').length > 0 && (
+            <span className="bg-amber-100 text-amber-700 text-xs font-black px-2 py-0.5 rounded-full">
+              {matches.filter(m => m.status === 'pending').length} pending
+            </span>
+          )}
         </div>
         <div className="divide-y divide-stone-100">
           {matches.filter(m => m.status === 'pending').map(match => {
             const matchSubmissions = submissions.filter(s => s.match_id === match.id);
-            const team1Sub = matchSubmissions.find(s => s.team_id === match.team1_id);
-            const team2Sub = matchSubmissions.find(s => s.team_id === match.team2_id);
-            const bothSubmitted = team1Sub && team2Sub;
-            const scoresMatch = bothSubmitted && team1Sub.score1 === team2Sub.score1 && team1Sub.score2 === team2Sub.score2;
-            const scoresConflict = bothSubmitted && !scoresMatch;
+            const team1Sub = matchSubmissions.find(s => Number(s.team_id) === Number(match.team1_id));
+            const team2Sub = matchSubmissions.find(s => Number(s.team_id) === Number(match.team2_id));
+            const scoresConflict = team1Sub && team2Sub && (Number(team1Sub.score1) !== Number(team2Sub.score1) || Number(team1Sub.score2) !== Number(team2Sub.score2));
             const waitingFor = !team1Sub ? match.team1_name : !team2Sub ? match.team2_name : null;
 
             return (
-              <div key={match.id} className={cn(
-                "p-6 space-y-4",
-                scoresConflict ? "bg-red-50" : bothSubmitted ? "bg-amber-50" : "bg-white"
-              )}>
-                {/* Match header */}
-                <div className="flex items-start justify-between gap-4 flex-wrap">
+              <div key={match.id} className={cn("px-6 py-4", scoresConflict ? "bg-red-50" : "bg-white")}>
+                {/* Match title row */}
+                <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
                   <div>
-                    <div className="font-bold text-stone-900 text-base">{match.team1_name} vs {match.team2_name}</div>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="text-[10px] font-black uppercase text-stone-400">{match.stage.replace(/-/g, ' ')}</span>
-                      {match.start_time && <span className="text-[10px] font-bold text-maroon-700"><Clock className="w-3 h-3 inline mr-0.5" />{match.start_time}</span>}
-                    </div>
+                    <span className="font-bold text-stone-900">{match.team1_name} vs {match.team2_name}</span>
+                    <span className="ml-2 text-[10px] font-black uppercase text-stone-400">{match.stage.replace(/-/g, ' ')}</span>
+                    {match.start_time && <span className="ml-2 text-[10px] font-bold text-maroon-700">{match.start_time}</span>}
                   </div>
-                  {/* Status badge */}
-                  {scoresConflict && (
-                    <span className="flex items-center gap-1.5 bg-red-100 text-red-700 text-xs font-black px-3 py-1.5 rounded-full border border-red-200">
-                      <AlertCircle className="w-3.5 h-3.5" />
-                      Scores don't match — admin action needed
-                    </span>
-                  )}
-                  {waitingFor && (
-                    <span className="flex items-center gap-1.5 bg-amber-100 text-amber-700 text-xs font-black px-3 py-1.5 rounded-full border border-amber-200">
-                      <Clock className="w-3.5 h-3.5" />
-                      Waiting for {waitingFor} to submit
-                    </span>
-                  )}
+                  {scoresConflict && <span className="flex items-center gap-1 text-[10px] font-black text-red-600 bg-red-100 px-2 py-1 rounded-full"><AlertCircle className="w-3 h-3" />Scores conflict</span>}
+                  {waitingFor && <span className="flex items-center gap-1 text-[10px] font-black text-amber-600 bg-amber-100 px-2 py-1 rounded-full"><Clock className="w-3 h-3" />Waiting for {waitingFor}</span>}
                 </div>
 
-                {/* Submissions grid */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {[
-                    { team: match.team1_name, teamId: match.team1_id, sub: team1Sub },
-                    { team: match.team2_name, teamId: match.team2_id, sub: team2Sub },
-                  ].map(({ team, teamId, sub }) => (
-                    <div key={teamId} className={cn(
-                      "rounded-xl border p-4",
-                      sub ? "bg-white border-stone-200" : "bg-stone-50 border-dashed border-stone-300"
-                    )}>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-black text-stone-500 uppercase">{team}</span>
-                        {sub ? (
-                          <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">
-                            <CheckCircle2 className="w-3 h-3" />Submitted
-                          </span>
-                        ) : (
-                          <span className="text-[10px] font-bold text-stone-400 italic">Not submitted yet</span>
-                        )}
+                {/* Two team submissions side by side */}
+                <div className="grid grid-cols-2 gap-3">
+                  {([
+                    { team: match.team1_name, sub: team1Sub },
+                    { team: match.team2_name, sub: team2Sub },
+                  ] as { team: string, sub: typeof team1Sub }[]).map(({ team, sub }) => (
+                    <div key={team} className={cn("rounded-lg border p-3 text-sm", sub ? "bg-white border-stone-200" : "bg-stone-50 border-dashed border-stone-200")}>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] font-black text-stone-500 uppercase truncate">{team}</span>
+                        {sub
+                          ? <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full shrink-0">✓ Submitted</span>
+                          : <span className="text-[9px] text-stone-400 italic shrink-0">Awaiting...</span>
+                        }
                       </div>
                       {sub ? (
-                        <div className="space-y-2">
+                        <div className="space-y-1.5">
                           <div className="flex items-center gap-2">
-                            <span className="text-2xl font-black text-stone-900">{sub.score1} – {sub.score2}</span>
-                            {scoresConflict && (
-                              <AlertCircle className="w-4 h-4 text-red-500" />
-                            )}
+                            <span className="text-xl font-black text-stone-900">{sub.score1} – {sub.score2}</span>
+                            {scoresConflict && <AlertCircle className="w-3.5 h-3.5 text-red-500" />}
                           </div>
-                          {sub.scorers && (() => {
-                            const scorerList = typeof sub.scorers === 'string' ? JSON.parse(sub.scorers) : sub.scorers;
-                            return scorerList.length > 0 ? (
-                              <div className="text-xs text-stone-500">
-                                <span className="font-bold">Scorers: </span>{scorerList.join(', ')}
-                              </div>
-                            ) : null;
+                          {(() => {
+                            const scorerList = typeof sub.scorers === 'string' ? JSON.parse(sub.scorers) : (sub.scorers || []);
+                            return scorerList.length > 0 ? <div className="text-[10px] text-stone-400 truncate">⚽ {scorerList.join(', ')}</div> : null;
                           })()}
-                          <button
-                            onClick={() => forceApprove(sub.id)}
-                            className="w-full mt-1 text-xs bg-maroon-700 text-white px-3 py-1.5 rounded-lg font-bold hover:bg-maroon-800 transition-all"
-                          >
-                            Force Approve This Score
+                          <button onClick={() => forceApprove(sub.id)} className="w-full text-[10px] font-black bg-maroon-700 text-white px-2 py-1.5 rounded-lg hover:bg-maroon-800 transition-all">
+                            Force Approve
                           </button>
                         </div>
                       ) : (
-                        <div className="h-10 flex items-center">
-                          <span className="text-sm text-stone-300 font-bold">— awaiting —</span>
-                        </div>
+                        <div className="h-8 flex items-center"><span className="text-stone-300 text-xs">—</span></div>
                       )}
                     </div>
                   ))}
@@ -1740,7 +1730,7 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
             );
           })}
           {matches.filter(m => m.status === 'pending').length === 0 && (
-            <div className="px-6 py-12 text-center text-stone-400 italic">No pending submissions</div>
+            <div className="px-6 py-10 text-center text-stone-400 italic">No pending submissions</div>
           )}
         </div>
       </section>
