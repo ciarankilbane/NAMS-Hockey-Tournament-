@@ -221,10 +221,15 @@ async function progressKnockoutWinner(match_id: number) {
   let loserNextStage: string | null = null;
 
   if (match.stage === 'play-off-8v9') {
-    winnerNextStage = 'quarter-final'; // winner fills seed 8 spot
+    // Winner slots into the QF that has team1 set but team2 still null (seed 1's match)
+    const qfSlot = await db.get(
+      `SELECT * FROM matches WHERE tournament_type = ? AND stage = 'quarter-final' AND team1_id IS NOT NULL AND team1_id != 0 AND (team2_id IS NULL OR team2_id = 0) ORDER BY id ASC LIMIT 1`,
+      [match.tournament_type]
+    );
+    if (qfSlot) await db.run(`UPDATE matches SET team2_id = ? WHERE id = ?`, [winnerId, qfSlot.id]);
+    return;
   } else if (match.stage === 'quarter-final') {
     winnerNextStage = 'semi-final';
-    loserNextStage = null; // losers are eliminated
   } else if (match.stage === 'semi-final') {
     winnerNextStage = 'final';
     loserNextStage = '3rd-4th-play-off';
@@ -605,26 +610,71 @@ async function startServer() {
     }
   });
 
-  // Generate 8v9 play-off slot (competitive only)
+  // Generate 8v9 play-off — auto-picks 8th & 9th from standings, fills QFs with seeds 1-7
   app.post("/api/generate-8v9", async (req, res) => {
-    const { tournament_type, team8_id, team9_id } = req.body;
+    const { tournament_type } = req.body;
     try {
-      // Check if 8v9 already exists
-      const existing = await db.get(
-        "SELECT id FROM matches WHERE tournament_type = ? AND stage = 'play-off-8v9'",
+      // Compute standings from completed round-robin matches
+      const rrMatches = await db.all(
+        `SELECT * FROM matches WHERE tournament_type = ? AND stage = 'round-robin' AND status = 'completed'`,
         [tournament_type]
       );
-      if (existing) {
-        // Update existing slot with teams
-        await db.run("UPDATE matches SET team1_id = ?, team2_id = ? WHERE id = ?", [team8_id, team9_id, existing.id]);
-      } else {
-        await db.run(
-          "INSERT INTO matches (team1_id, team2_id, tournament_type, stage, status) VALUES (?, ?, ?, 'play-off-8v9', 'scheduled')",
-          [team8_id || null, team9_id || null, tournament_type]
-        );
-      }
+      const teams = await db.all(`SELECT * FROM teams WHERE tournament_type = ?`, [tournament_type]);
+
+      // Build points table
+      const table: Record<number, { id: number, pts: number, gf: number, ga: number }> = {};
+      teams.forEach(t => { table[t.id] = { id: t.id, pts: 0, gf: 0, ga: 0 }; });
+      rrMatches.forEach(m => {
+        const t1 = table[m.team1_id], t2 = table[m.team2_id];
+        if (!t1 || !t2) return;
+        t1.gf += Number(m.score1); t1.ga += Number(m.score2);
+        t2.gf += Number(m.score2); t2.ga += Number(m.score1);
+        if (Number(m.score1) > Number(m.score2)) { t1.pts += 3; }
+        else if (Number(m.score1) < Number(m.score2)) { t2.pts += 3; }
+        else { t1.pts += 1; t2.pts += 1; }
+      });
+
+      const ranked = Object.values(table).sort((a, b) =>
+        b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf
+      );
+
+      if (ranked.length < 9) return res.status(400).json({ error: `Need at least 9 teams — only ${ranked.length} found` });
+
+      const seed8 = ranked[7].id;
+      const seed9 = ranked[8].id;
+      const top7 = ranked.slice(0, 7).map(r => r.id);
+
+      // Wipe existing 8v9 and QF slots, then recreate cleanly
+      await db.run(`DELETE FROM matches WHERE tournament_type = ? AND stage IN ('play-off-8v9', 'quarter-final')`, [tournament_type]);
+
+      // Insert 8v9
+      await db.run(
+        `INSERT INTO matches (team1_id, team2_id, tournament_type, stage, status) VALUES (?, ?, ?, 'play-off-8v9', 'scheduled')`,
+        [seed8, seed9, tournament_type]
+      );
+
+      // Insert QFs: seed1 v TBD(winner 8v9), seed2 v seed7, seed3 v seed6, seed4 v seed5
+      // QF1: seed1 vs winner of 8v9 — leave team2_id null
+      await db.run(
+        `INSERT INTO matches (team1_id, team2_id, tournament_type, stage, status) VALUES (?, NULL, ?, 'quarter-final', 'scheduled')`,
+        [top7[0], tournament_type]
+      );
+      await db.run(
+        `INSERT INTO matches (team1_id, team2_id, tournament_type, stage, status) VALUES (?, ?, ?, 'quarter-final', 'scheduled')`,
+        [top7[1], top7[6], tournament_type]
+      );
+      await db.run(
+        `INSERT INTO matches (team1_id, team2_id, tournament_type, stage, status) VALUES (?, ?, ?, 'quarter-final', 'scheduled')`,
+        [top7[2], top7[5], tournament_type]
+      );
+      await db.run(
+        `INSERT INTO matches (team1_id, team2_id, tournament_type, stage, status) VALUES (?, ?, ?, 'quarter-final', 'scheduled')`,
+        [top7[3], top7[4], tournament_type]
+      );
+
       io.emit("data_updated", await getFullData());
-      res.json({ success: true });
+      const teamNames = teams.reduce((acc: any, t: any) => { acc[t.id] = t.name; return acc; }, {});
+      res.json({ success: true, seed8: teamNames[seed8], seed9: teamNames[seed9] });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -650,35 +700,54 @@ async function startServer() {
         (s.team1_id === null || Number(s.team1_id) === 0 || s.team2_id === null || Number(s.team2_id) === 0)
       );
 
-      // Build pairings based on seeded ranking
-      const pairings: { stage: string, t1idx: number, t2idx: number }[] = [];
+      let filled = 0;
+
       if (tournament_type === 'competitive') {
-        if (teams.length >= 9) pairings.push({ stage: 'play-off-8v9', t1idx: 7, t2idx: 8 });
-        pairings.push({ stage: 'quarter-final', t1idx: 0, t2idx: 7 });
-        pairings.push({ stage: 'quarter-final', t1idx: 1, t2idx: 6 });
-        pairings.push({ stage: 'quarter-final', t1idx: 2, t2idx: 5 });
-        pairings.push({ stage: 'quarter-final', t1idx: 3, t2idx: 4 });
+        // Competitive: teams ranked 1-9
+        // 8v9 play-off: seeds 8 & 9 (index 7 & 8)
+        // QFs: 1v(8v9winner), 2v7, 3v6, 4v5 — seed 1's QF has team2 left NULL for 8v9 winner
+        if (teams.length >= 9) {
+          const t8 = teams[7], t9 = teams[8];
+          const slot8v9 = getSlot('play-off-8v9');
+          if (slot8v9 && t8 && t9) {
+            await db.run("UPDATE matches SET team1_id = ?, team2_id = ? WHERE id = ?", [t8.id, t9.id, slot8v9.id]);
+            usedIds.add(slot8v9.id);
+            filled++;
+          }
+        }
+
+        // QFs: fill top 7 seeds — leave one team2 slot NULL for 8v9 winner
+        // 1 vs TBD(8v9 winner), 2 vs 7, 3 vs 6, 4 vs 5
+        const qfPairings = [
+          { t1idx: 0, t2: null as number | null },   // seed 1 vs 8v9 winner (TBD)
+          { t1idx: 1, t2: teams[6]?.id ?? null },    // seed 2 vs seed 7
+          { t1idx: 2, t2: teams[5]?.id ?? null },    // seed 3 vs seed 6
+          { t1idx: 3, t2: teams[4]?.id ?? null },    // seed 4 vs seed 5
+        ];
+        for (const p of qfPairings) {
+          const t1 = teams[p.t1idx];
+          if (!t1) continue;
+          const slot = getSlot('quarter-final');
+          if (!slot) { console.warn('No QF slot available'); continue; }
+          await db.run("UPDATE matches SET team1_id = ?, team2_id = ? WHERE id = ?", [t1.id, p.t2, slot.id]);
+          usedIds.add(slot.id);
+          filled++;
+        }
       } else {
         // Chill semi-finals: 1v4, 2v3
-        pairings.push({ stage: 'semi-final', t1idx: 0, t2idx: 3 });
-        pairings.push({ stage: 'semi-final', t1idx: 1, t2idx: 2 });
-      }
-
-      let filled = 0;
-      for (const pairing of pairings) {
-        const t1 = teams[pairing.t1idx];
-        const t2 = teams[pairing.t2idx];
-        if (!t1 || !t2) { console.warn(`Missing team at index ${pairing.t1idx} or ${pairing.t2idx}`); continue; }
-
-        const slot = getSlot(pairing.stage);
-        if (!slot) { console.warn(`No available slot for stage: ${pairing.stage}`); continue; }
-
-        await db.run(
-          "UPDATE matches SET team1_id = ?, team2_id = ? WHERE id = ?",
-          [t1.id, t2.id, slot.id]
-        );
-        usedIds.add(slot.id);
-        filled++;
+        const sfPairings = [
+          { t1idx: 0, t2idx: 3 },
+          { t1idx: 1, t2idx: 2 },
+        ];
+        for (const p of sfPairings) {
+          const t1 = teams[p.t1idx], t2 = teams[p.t2idx];
+          if (!t1 || !t2) continue;
+          const slot = getSlot('semi-final');
+          if (!slot) continue;
+          await db.run("UPDATE matches SET team1_id = ?, team2_id = ? WHERE id = ?", [t1.id, t2.id, slot.id]);
+          usedIds.add(slot.id);
+          filled++;
+        }
       }
 
       if (filled === 0) return res.status(400).json({ error: "No TBD slots found. Use Pre-Generate Knockout Slots first." });
