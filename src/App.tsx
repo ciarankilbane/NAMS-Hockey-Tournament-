@@ -840,8 +840,6 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
   const [extraMatchTeam2, setExtraMatchTeam2] = useState<number | null>(null);
   const [extraMatchGroup, setExtraMatchGroup] = useState<string>('');
   const [confirmWipeKnockouts, setConfirmWipeKnockouts] = useState(false);
-  const [team8Id, setTeam8Id] = useState<number | null>(null);
-  const [team9Id, setTeam9Id] = useState<number | null>(null);
   const [newTeamGroup, setNewTeamGroup] = useState('Group 1');
   const [editingMatchId, setEditingMatchId] = useState<number | null>(null);
   const [editScore1, setEditScore1] = useState(0);
@@ -1101,8 +1099,10 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
   };
 
   const generate8v9 = async () => {
-    const res = await fetch('/api/generate-8v9', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tournament_type: tournamentType, team8_id: team8Id, team9_id: team9Id }) });
+    const res = await fetch('/api/generate-8v9', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tournament_type: tournamentType }) });
     if (!res.ok) { const err = await res.json(); alert(`Error: ${err.error}`); return; }
+    const result = await res.json();
+    alert(`Done! 8v9: ${result.seed8} vs ${result.seed9}. QFs filled with seeds 1–7, seed 1 awaits winner.`);
     onRefresh();
   };
 
@@ -1374,38 +1374,10 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
             )}
 
             <button onClick={fillTeamsFromStandings} disabled={Object.keys(standings).length === 0} className="flex items-center gap-2 bg-blue-700 text-white py-2.5 px-4 rounded-xl font-bold hover:bg-blue-800 disabled:bg-stone-200 transition-all text-xs">
-              <Trophy className="w-4 h-4" />Fill Teams from Standings
+              <Trophy className="w-4 h-4" />Fill Knockout Bracket from Standings
             </button>
           </div>
         </div>
-
-        {/* 8v9 play-off (competitive only) */}
-        {tournamentType === 'competitive' && (
-          <div className="mb-4 pt-4 border-t border-stone-100">
-            <p className="text-[10px] font-black uppercase text-stone-400 tracking-widest mb-2">8v9 Play-off</p>
-            <div className="flex flex-wrap gap-3 items-end">
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-400">8th seed</label>
-                <select value={team8Id ?? ''} onChange={e => setTeam8Id(Number(e.target.value) || null)} className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
-                  <option value="">From standings</option>
-                  {filteredTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                </select>
-              </div>
-              <span className="text-stone-400 font-bold pb-2">vs</span>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-stone-400">9th seed</label>
-                <select value={team9Id ?? ''} onChange={e => setTeam9Id(Number(e.target.value) || null)} className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
-                  <option value="">From standings</option>
-                  {filteredTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                </select>
-              </div>
-              <button onClick={generate8v9} className="flex items-center gap-2 bg-maroon-700 text-white py-2 px-4 rounded-xl font-bold hover:bg-maroon-800 transition-all text-xs">
-                <Plus className="w-4 h-4" />Generate 8v9
-              </button>
-              <p className="w-full text-[10px] text-stone-400 italic">Leave selectors blank to auto-pick 8th & 9th from standings when Fill Teams is clicked</p>
-            </div>
-          </div>
-        )}
 
         {/* Start Knockouts */}
         <div className="mt-2 pt-4 border-t border-stone-100">
@@ -1426,7 +1398,7 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
             <div className="flex items-center justify-between gap-4 bg-amber-50 border border-amber-200 rounded-xl px-5 py-4">
               <div>
                 <p className="text-sm font-black text-amber-800">Knockouts not yet started</p>
-                <p className="text-xs text-amber-600">Fill teams from standings first, then press Start Knockouts. Winners will auto-advance once active.</p>
+                <p className="text-xs text-amber-600">Fill bracket from standings first (seeds 8 &amp; 9 go to 8v9, seeds 1–7 to QFs), then press Start Knockouts. Winners auto-advance each round.</p>
               </div>
               <button onClick={startKnockouts} className="shrink-0 flex items-center gap-2 bg-maroon-900 text-white font-black text-sm px-5 py-3 rounded-xl hover:bg-black transition-all shadow-md">
                 <Trophy className="w-4 h-4" />Start Knockouts
