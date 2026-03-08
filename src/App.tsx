@@ -1095,17 +1095,30 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
   };
 
   const fillTeamsFromStandings = async () => {
-    // Get sorted teams from standings
-    const allTeamsSorted = (Object.values(standings).flat() as any[]).sort((a, b) => b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf);
+    const groupEntries = Object.entries(standings) as [string, any[]][];
+    if (groupEntries.length === 0) { alert('No standings data yet — complete some group stage matches first.'); return; }
 
-    if (tournamentType === 'competitive') {
-      await fetch('/api/generate-knockouts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tournament_type: tournamentType, teams: allTeamsSorted }) });
-    } else {
-      const winners = Object.values(standings).map((g: any[]) => g[0]).filter(Boolean);
-      if (winners.length < 3 || !bestSecondPlace) { alert('Group stages not complete!'); return; }
-      const knockoutTeams = [...winners, bestSecondPlace];
-      await fetch('/api/generate-knockouts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tournament_type: tournamentType, teams: knockoutTeams }) });
+    // Rank by position across groups: all 1st places sorted by pts/GD/GF, then all 2nd places, etc.
+    const maxTeamsPerGroup = Math.max(...groupEntries.map(([, g]) => g.length));
+    const rankedTeams: any[] = [];
+    for (let pos = 0; pos < maxTeamsPerGroup; pos++) {
+      const teamsAtPos = groupEntries
+        .map(([, group]) => group[pos])
+        .filter(Boolean)
+        .sort((a, b) => b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf);
+      rankedTeams.push(...teamsAtPos);
     }
+
+    if (rankedTeams.length < 2) { alert('Not enough teams in standings to fill knockout slots.'); return; }
+
+    const res = await fetch('/api/fill-knockout-slots', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tournament_type: tournamentType, teams: rankedTeams })
+    });
+    if (!res.ok) { const err = await res.json(); alert(`Error: ${err.error}`); return; }
+    const result = await res.json();
+    alert(`Done! Filled ${result.filled} knockout slot${result.filled !== 1 ? 's' : ''}.`);
     onRefresh();
   };
 
