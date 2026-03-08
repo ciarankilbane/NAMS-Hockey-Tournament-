@@ -135,6 +135,10 @@ async function initDb() {
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL UNIQUE
     );
+    CREATE TABLE IF NOT EXISTS tournament_settings (
+      tournament_type TEXT PRIMARY KEY,
+      knockouts_started BOOLEAN DEFAULT FALSE
+    );
   `;
 
   if (db.type === "sqlite") {
@@ -149,6 +153,16 @@ async function initDb() {
   }
 
   try { await db.run("ALTER TABLE teams ADD COLUMN group_name TEXT"); } catch (e) {}
+  // Create tournament_settings table (migration-safe)
+  try {
+    if (db.type === "sqlite") {
+      await db.exec("CREATE TABLE IF NOT EXISTS tournament_settings (tournament_type TEXT PRIMARY KEY, knockouts_started INTEGER DEFAULT 0)");
+    } else {
+      await db.exec("CREATE TABLE IF NOT EXISTS tournament_settings (tournament_type TEXT PRIMARY KEY, knockouts_started BOOLEAN DEFAULT FALSE)");
+    }
+    await db.run("INSERT INTO tournament_settings (tournament_type) VALUES (?) ON CONFLICT DO NOTHING", ["competitive"]);
+    await db.run("INSERT INTO tournament_settings (tournament_type) VALUES (?) ON CONFLICT DO NOTHING", ["chill"]);
+  } catch (e) {}
   try { await db.run("ALTER TABLE matches ADD COLUMN match_date TEXT"); } catch (e) {}
   try { await db.run("ALTER TABLE matches ADD COLUMN umpire TEXT"); } catch (e) {}
   // Create umpires table if it doesn't exist yet (migration-safe)
@@ -176,7 +190,70 @@ async function getFullData() {
     JOIN teams t ON g.team_id = t.id
   `);
   const umpires = await db.all("SELECT * FROM umpires ORDER BY name ASC");
-  return { teams, matches, submissions, goals, umpires };
+  const settings = await db.all("SELECT * FROM tournament_settings");
+  return { teams, matches, submissions, goals, umpires, settings };
+}
+
+
+// Auto-progress winner to next knockout round
+async function progressKnockoutWinner(match_id: number) {
+  const match = await db.get(`
+    SELECT m.*, t1.name as team1_name, t2.name as team2_name
+    FROM matches m
+    LEFT JOIN teams t1 ON m.team1_id = t1.id
+    LEFT JOIN teams t2 ON m.team2_id = t2.id
+    WHERE m.id = ?
+  `, [match_id]);
+  if (!match || match.status !== 'completed') return;
+
+  const knockoutStages = ['play-off-8v9', 'quarter-final', 'semi-final', 'final', '3rd-4th-play-off'];
+  if (!knockoutStages.includes(match.stage)) return;
+
+  // Only auto-advance if knockouts have been started
+  const settingsRow = await db.get("SELECT knockouts_started FROM tournament_settings WHERE tournament_type = ?", [match.tournament_type]);
+  if (!settingsRow || !settingsRow.knockouts_started) return;
+
+  const winnerId = Number(match.score1) > Number(match.score2) ? Number(match.team1_id) : Number(match.team2_id);
+  const loserId  = Number(match.score1) > Number(match.score2) ? Number(match.team2_id) : Number(match.team1_id);
+
+  // Determine next stage for winner and loser
+  let winnerNextStage: string | null = null;
+  let loserNextStage: string | null = null;
+
+  if (match.stage === 'play-off-8v9') {
+    winnerNextStage = 'quarter-final'; // winner fills seed 8 spot
+  } else if (match.stage === 'quarter-final') {
+    winnerNextStage = 'semi-final';
+    loserNextStage = null; // losers are eliminated
+  } else if (match.stage === 'semi-final') {
+    winnerNextStage = 'final';
+    loserNextStage = '3rd-4th-play-off';
+  }
+  // final and 3rd-4th-play-off have nowhere to progress
+
+  // Fill winner into next stage slot
+  if (winnerNextStage) {
+    const nextSlot = await db.get(
+      `SELECT * FROM matches WHERE tournament_type = ? AND stage = ? AND (team1_id IS NULL OR team1_id = 0 OR team2_id IS NULL OR team2_id = 0) ORDER BY id ASC LIMIT 1`,
+      [match.tournament_type, winnerNextStage]
+    );
+    if (nextSlot) {
+      const field = (!nextSlot.team1_id || Number(nextSlot.team1_id) === 0) ? 'team1_id' : 'team2_id';
+      await db.run(`UPDATE matches SET ${field} = ? WHERE id = ?`, [winnerId, nextSlot.id]);
+    }
+  }
+
+  // Fill loser into 3rd/4th playoff slot
+  if (loserNextStage) {
+    const loserSlot = await db.get(
+      `SELECT * FROM matches WHERE tournament_type = ? AND stage = ? AND (team1_id IS NULL OR team1_id = 0 OR team2_id IS NULL OR team2_id = 0) ORDER BY id ASC LIMIT 1`,
+      [match.tournament_type, loserNextStage]
+    );
+    if (loserSlot) {
+      const field = (!loserSlot.team1_id || Number(loserSlot.team1_id) === 0) ? 'team1_id' : 'team2_id';
+      await db.run(`UPDATE matches SET ${field} = ? WHERE id = ?`, [loserId, loserSlot.id]);
+    }
+  }
 }
 
 async function startServer() {
@@ -417,11 +494,10 @@ async function startServer() {
             );
           }
 
-          io.emit("match_updated", { id: match_id, score1, score2, status: 'completed' });
-          const goals = await db.all(`
-            SELECT g.*, t.name as team_name, t.tournament_type
-            FROM goals g JOIN teams t ON g.team_id = t.id
-          `);
+          await progressKnockoutWinner(match_id);
+          const fullData = await getFullData();
+          io.emit("data_updated", fullData);
+          const goals = fullData.goals;
           io.emit("goals_updated", goals);
         } else {
           await db.run("UPDATE matches SET status = 'pending' WHERE id = ?", [match_id]);
@@ -480,6 +556,74 @@ async function startServer() {
         FROM goals g JOIN teams t ON g.team_id = t.id
       `);
       io.emit("goals_updated", goals);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Wipe all knockout slots for a tournament type
+  app.post("/api/start-knockouts", async (req, res) => {
+    const { tournament_type } = req.body;
+    try {
+      await db.run(
+        "UPDATE tournament_settings SET knockouts_started = TRUE WHERE tournament_type = ?",
+        [tournament_type]
+      );
+      io.emit("data_updated", await getFullData());
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/stop-knockouts", async (req, res) => {
+    const { tournament_type } = req.body;
+    try {
+      await db.run(
+        "UPDATE tournament_settings SET knockouts_started = FALSE WHERE tournament_type = ?",
+        [tournament_type]
+      );
+      io.emit("data_updated", await getFullData());
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/wipe-knockout-slots", async (req, res) => {
+    const { tournament_type } = req.body;
+    try {
+      await db.run(
+        "DELETE FROM matches WHERE tournament_type = ? AND stage NOT IN ('round-robin', 'break')",
+        [tournament_type]
+      );
+      io.emit("data_updated", await getFullData());
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Generate 8v9 play-off slot (competitive only)
+  app.post("/api/generate-8v9", async (req, res) => {
+    const { tournament_type, team8_id, team9_id } = req.body;
+    try {
+      // Check if 8v9 already exists
+      const existing = await db.get(
+        "SELECT id FROM matches WHERE tournament_type = ? AND stage = 'play-off-8v9'",
+        [tournament_type]
+      );
+      if (existing) {
+        // Update existing slot with teams
+        await db.run("UPDATE matches SET team1_id = ?, team2_id = ? WHERE id = ?", [team8_id, team9_id, existing.id]);
+      } else {
+        await db.run(
+          "INSERT INTO matches (team1_id, team2_id, tournament_type, stage, status) VALUES (?, ?, ?, 'play-off-8v9', 'scheduled')",
+          [team8_id || null, team9_id || null, tournament_type]
+        );
+      }
+      io.emit("data_updated", await getFullData());
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -622,7 +766,8 @@ async function startServer() {
         WHERE m.id = ?
       `, [submission.match_id]);
 
-      io.emit("match_updated", updatedMatch);
+      await progressKnockoutWinner(submission.match_id);
+      io.emit("data_updated", await getFullData());
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
