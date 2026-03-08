@@ -486,6 +486,66 @@ async function startServer() {
     }
   });
 
+  // Fill existing TBD knockout slots with teams ranked from standings
+  app.post("/api/fill-knockout-slots", async (req, res) => {
+    const { tournament_type, teams } = req.body;
+    if (!teams || teams.length < 2) return res.status(400).json({ error: "Not enough teams" });
+
+    try {
+      // Fetch all TBD slots, ordered by id (preserves insertion order from pre-generate)
+      const allSlots = await db.all(
+        `SELECT * FROM matches WHERE tournament_type = ? AND stage != 'round-robin' AND stage != 'break' ORDER BY id ASC`,
+        [tournament_type]
+      );
+
+      // Helper: find next unfilled slot for a given stage
+      const usedIds = new Set<number>();
+      const getSlot = (stage: string) => allSlots.find(s =>
+        s.stage === stage &&
+        !usedIds.has(s.id) &&
+        (s.team1_id === null || Number(s.team1_id) === 0 || s.team2_id === null || Number(s.team2_id) === 0)
+      );
+
+      // Build pairings based on seeded ranking
+      const pairings: { stage: string, t1idx: number, t2idx: number }[] = [];
+      if (tournament_type === 'competitive') {
+        if (teams.length >= 9) pairings.push({ stage: 'play-off-8v9', t1idx: 7, t2idx: 8 });
+        pairings.push({ stage: 'quarter-final', t1idx: 0, t2idx: 7 });
+        pairings.push({ stage: 'quarter-final', t1idx: 1, t2idx: 6 });
+        pairings.push({ stage: 'quarter-final', t1idx: 2, t2idx: 5 });
+        pairings.push({ stage: 'quarter-final', t1idx: 3, t2idx: 4 });
+      } else {
+        // Chill semi-finals: 1v4, 2v3
+        pairings.push({ stage: 'semi-final', t1idx: 0, t2idx: 3 });
+        pairings.push({ stage: 'semi-final', t1idx: 1, t2idx: 2 });
+      }
+
+      let filled = 0;
+      for (const pairing of pairings) {
+        const t1 = teams[pairing.t1idx];
+        const t2 = teams[pairing.t2idx];
+        if (!t1 || !t2) { console.warn(`Missing team at index ${pairing.t1idx} or ${pairing.t2idx}`); continue; }
+
+        const slot = getSlot(pairing.stage);
+        if (!slot) { console.warn(`No available slot for stage: ${pairing.stage}`); continue; }
+
+        await db.run(
+          "UPDATE matches SET team1_id = ?, team2_id = ? WHERE id = ?",
+          [t1.id, t2.id, slot.id]
+        );
+        usedIds.add(slot.id);
+        filled++;
+      }
+
+      if (filled === 0) return res.status(400).json({ error: "No TBD slots found. Use Pre-Generate Knockout Slots first." });
+
+      io.emit("data_updated", await getFullData());
+      res.json({ success: true, filled });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/generate-knockouts", async (req, res) => {
     const { tournament_type, teams } = req.body;
     if (teams.length < 2) return res.status(400).json({ error: "Need more teams" });
