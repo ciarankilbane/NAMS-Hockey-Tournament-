@@ -24,7 +24,7 @@ function formatDate(dateStr: string | undefined | null): string {
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'live' | 'umpire' | 'report' | 'admin'>('dashboard');
   const [tournamentType, setTournamentType] = useState<TournamentType>('competitive');
-  const [data, setData] = useState<AppData & { goals: Goal[], umpires: {id: number, name: string}[] }>({ teams: [], matches: [], submissions: [], goals: [], umpires: [] });
+  const [data, setData] = useState<AppData & { goals: Goal[], umpires: {id: number, name: string}[], settings: {tournament_type: string, knockouts_started: boolean}[] }>({ teams: [], matches: [], submissions: [], goals: [], umpires: [], settings: [] });
   const [loading, setLoading] = useState(true);
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
   const [adminPassword, setAdminPassword] = useState('');
@@ -415,7 +415,7 @@ export default function App() {
                   </div>
                 </div>
               ) : (
-                <AdminPanel teams={data.teams} matches={data.matches} tournamentType={tournamentType} standings={standings} bestSecondPlace={bestSecondPlace} submissions={data.submissions} goals={data.goals} umpires={data.umpires} onRefresh={fetchData} isLocalMode={isLocalMode} />
+                <AdminPanel teams={data.teams} matches={data.matches} tournamentType={tournamentType} standings={standings} bestSecondPlace={bestSecondPlace} submissions={data.submissions} goals={data.goals} umpires={data.umpires} settings={data.settings} onRefresh={fetchData} isLocalMode={isLocalMode} />
               )}
             </motion.div>
           )}
@@ -817,15 +817,31 @@ const TOURNAMENT_SLOTS: Record<string, Record<'chill' | 'competitive', string[]>
   '2026-03-08': { chill: ['11:30','11:50','12:10','12:30','12:50','13:10','13:30'], competitive: ['12:00','12:25','12:50','13:15','13:40'] }
 };
 
-function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace, submissions, goals, umpires, onRefresh, isLocalMode }: {
-  teams: Team[], matches: Match[], tournamentType: TournamentType, standings: Record<string, any[]>, bestSecondPlace: any, submissions: Submission[], goals: Goal[], umpires: {id: number, name: string}[], onRefresh: () => void, isLocalMode: boolean
+function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace, submissions, goals, umpires, settings, onRefresh, isLocalMode }: {
+  teams: Team[], matches: Match[], tournamentType: TournamentType, standings: Record<string, any[]>, bestSecondPlace: any, submissions: Submission[], goals: Goal[], umpires: {id: number, name: string}[], settings: {tournament_type: string, knockouts_started: boolean}[], onRefresh: () => void, isLocalMode: boolean
 }) {
+  const knockoutsStarted = settings?.find(s => s.tournament_type === tournamentType)?.knockouts_started ?? false;
+
+  const startKnockouts = async () => {
+    const res = await fetch('/api/start-knockouts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tournament_type: tournamentType }) });
+    if (!res.ok) { alert('Error starting knockouts'); return; }
+    onRefresh();
+  };
+
+  const stopKnockouts = async () => {
+    await fetch('/api/stop-knockouts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tournament_type: tournamentType }) });
+    onRefresh();
+  };
+
   const [newTeamName, setNewTeamName] = useState('');
   const [newUmpireName, setNewUmpireName] = useState('');
   const [confirmDeleteUmpireId, setConfirmDeleteUmpireId] = useState<number | null>(null);
   const [extraMatchTeam1, setExtraMatchTeam1] = useState<number | null>(null);
   const [extraMatchTeam2, setExtraMatchTeam2] = useState<number | null>(null);
   const [extraMatchGroup, setExtraMatchGroup] = useState<string>('');
+  const [confirmWipeKnockouts, setConfirmWipeKnockouts] = useState(false);
+  const [team8Id, setTeam8Id] = useState<number | null>(null);
+  const [team9Id, setTeam9Id] = useState<number | null>(null);
   const [newTeamGroup, setNewTeamGroup] = useState('Group 1');
   const [editingMatchId, setEditingMatchId] = useState<number | null>(null);
   const [editScore1, setEditScore1] = useState(0);
@@ -1078,6 +1094,18 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
     } catch (err: any) { alert(err.message); }
   };
 
+  const wipeKnockouts = async () => {
+    const res = await fetch('/api/wipe-knockout-slots', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tournament_type: tournamentType }) });
+    if (!res.ok) { const err = await res.json(); alert(`Error: ${err.error}`); return; }
+    setConfirmWipeKnockouts(false); onRefresh();
+  };
+
+  const generate8v9 = async () => {
+    const res = await fetch('/api/generate-8v9', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tournament_type: tournamentType, team8_id: team8Id, team9_id: team9Id }) });
+    if (!res.ok) { const err = await res.json(); alert(`Error: ${err.error}`); return; }
+    onRefresh();
+  };
+
   const preGenerateKnockouts = async () => {
     const stages = tournamentType === 'competitive'
       ? ['play-off-8v9', 'quarter-final', 'quarter-final', 'quarter-final', 'quarter-final', 'semi-final', 'semi-final', 'final', '3rd-4th-play-off']
@@ -1313,51 +1341,100 @@ function AdminPanel({ teams, matches, tournamentType, standings, bestSecondPlace
       {/* Tournament Controls */}
       <section className="bg-white rounded-2xl border border-stone-200 shadow-sm p-6">
         <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><Calendar className="w-5 h-5 text-maroon-700" />Tournament Controls</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <button onClick={generateSchedule} disabled={filteredTeams.length < 2} className="flex items-center justify-center gap-2 bg-maroon-700 text-white py-3 rounded-xl font-bold hover:bg-maroon-800 disabled:bg-stone-200 transition-all text-xs">
-            <RefreshCw className="w-4 h-4" />Generate Round Robin
-          </button>
 
-          <button onClick={preGenerateKnockouts} className="flex items-center justify-center gap-2 bg-stone-800 text-white py-3 rounded-xl font-bold hover:bg-black transition-all text-xs">
-            <Plus className="w-4 h-4" />Pre-Generate Knockout Slots
-          </button>
-
-          <button onClick={fillTeamsFromStandings} disabled={Object.keys(standings).length === 0} className="flex items-center justify-center gap-2 bg-blue-700 text-white py-3 rounded-xl font-bold hover:bg-blue-800 disabled:bg-stone-200 transition-all text-xs">
-            <Trophy className="w-4 h-4" />Fill Teams from Standings
-          </button>
-
-          {tournamentType === 'competitive' ? (
-            <button
-              onClick={async () => {
-                const semiFinals = matches.filter(m => m.tournament_type === tournamentType && m.stage === 'semi-final' && m.status === 'completed');
-                if (semiFinals.length < 2) { alert("Complete all Semi-Finals first!"); return; }
-                const winners = semiFinals.map(m => m.score1 > m.score2 ? { id: m.team1_id, name: m.team1_name } : { id: m.team2_id, name: m.team2_name });
-                const losers = semiFinals.map(m => m.score1 > m.score2 ? { id: m.team2_id, name: m.team2_name } : { id: m.team1_id, name: m.team1_name });
-                await fetch('/api/generate-next-stage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tournament_type: tournamentType, stage: 'final', teams: [...winners, ...losers] }) });
-                onRefresh();
-              }}
-              disabled={matches.filter(m => m.tournament_type === tournamentType && m.stage === 'semi-final' && m.status === 'completed').length < 2}
-              className="flex items-center justify-center gap-2 bg-maroon-900 text-white py-3 rounded-xl font-bold hover:bg-black disabled:bg-stone-200 transition-all text-xs"
-            >
-              <Trophy className="w-4 h-4" />Generate Final & 3rd/4th
+        {/* Round Robin */}
+        <div className="mb-4">
+          <p className="text-[10px] font-black uppercase text-stone-400 tracking-widest mb-2">Group Stage</p>
+          <div className="flex flex-wrap gap-3">
+            <button onClick={generateSchedule} disabled={filteredTeams.length < 2} className="flex items-center gap-2 bg-maroon-700 text-white py-2.5 px-4 rounded-xl font-bold hover:bg-maroon-800 disabled:bg-stone-200 transition-all text-xs">
+              <RefreshCw className="w-4 h-4" />Generate Round Robin
             </button>
+          </div>
+        </div>
+
+        {/* Knockout setup */}
+        <div className="mb-4 pt-4 border-t border-stone-100">
+          <p className="text-[10px] font-black uppercase text-stone-400 tracking-widest mb-2">Knockout Setup</p>
+          <div className="flex flex-wrap gap-3 items-start">
+
+            <button onClick={preGenerateKnockouts} className="flex items-center gap-2 bg-stone-800 text-white py-2.5 px-4 rounded-xl font-bold hover:bg-black transition-all text-xs">
+              <Plus className="w-4 h-4" />Pre-Generate Slots
+            </button>
+
+            {confirmWipeKnockouts ? (
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-red-600">Wipe all knockout matches?</span>
+                <button onClick={wipeKnockouts} className="bg-red-600 text-white text-xs font-bold px-3 py-2 rounded-xl hover:bg-red-700">Yes, Wipe</button>
+                <button onClick={() => setConfirmWipeKnockouts(false)} className="bg-stone-200 text-stone-600 text-xs font-bold px-3 py-2 rounded-xl">Cancel</button>
+              </div>
+            ) : (
+              <button onClick={() => setConfirmWipeKnockouts(true)} className="flex items-center gap-2 bg-red-50 text-red-600 border border-red-200 py-2.5 px-4 rounded-xl font-bold hover:bg-red-100 transition-all text-xs">
+                <Trash2 className="w-4 h-4" />Wipe Knockout Slots
+              </button>
+            )}
+
+            <button onClick={fillTeamsFromStandings} disabled={Object.keys(standings).length === 0} className="flex items-center gap-2 bg-blue-700 text-white py-2.5 px-4 rounded-xl font-bold hover:bg-blue-800 disabled:bg-stone-200 transition-all text-xs">
+              <Trophy className="w-4 h-4" />Fill Teams from Standings
+            </button>
+          </div>
+        </div>
+
+        {/* 8v9 play-off (competitive only) */}
+        {tournamentType === 'competitive' && (
+          <div className="mb-4 pt-4 border-t border-stone-100">
+            <p className="text-[10px] font-black uppercase text-stone-400 tracking-widest mb-2">8v9 Play-off</p>
+            <div className="flex flex-wrap gap-3 items-end">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-400">8th seed</label>
+                <select value={team8Id ?? ''} onChange={e => setTeam8Id(Number(e.target.value) || null)} className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
+                  <option value="">From standings</option>
+                  {filteredTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </div>
+              <span className="text-stone-400 font-bold pb-2">vs</span>
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-stone-400">9th seed</label>
+                <select value={team9Id ?? ''} onChange={e => setTeam9Id(Number(e.target.value) || null)} className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-maroon-500">
+                  <option value="">From standings</option>
+                  {filteredTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </div>
+              <button onClick={generate8v9} className="flex items-center gap-2 bg-maroon-700 text-white py-2 px-4 rounded-xl font-bold hover:bg-maroon-800 transition-all text-xs">
+                <Plus className="w-4 h-4" />Generate 8v9
+              </button>
+              <p className="w-full text-[10px] text-stone-400 italic">Leave selectors blank to auto-pick 8th & 9th from standings when Fill Teams is clicked</p>
+            </div>
+          </div>
+        )}
+
+        {/* Start Knockouts */}
+        <div className="mt-2 pt-4 border-t border-stone-100">
+          {knockoutsStarted ? (
+            <div className="flex items-center justify-between gap-4 bg-emerald-50 border border-emerald-300 rounded-xl px-5 py-4">
+              <div className="flex items-center gap-3">
+                <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                <div>
+                  <p className="text-sm font-black text-emerald-800">Knockouts are LIVE</p>
+                  <p className="text-xs text-emerald-600">Winners are automatically advancing to the next round when scores are confirmed.</p>
+                </div>
+              </div>
+              <button onClick={stopKnockouts} className="shrink-0 text-[10px] font-black text-red-500 border border-red-200 bg-white px-3 py-1.5 rounded-lg hover:bg-red-50 transition-all">
+                Stop
+              </button>
+            </div>
           ) : (
-            <button
-              onClick={async () => {
-                const semiFinals = matches.filter(m => m.tournament_type === tournamentType && m.stage === 'semi-final' && m.status === 'completed');
-                if (semiFinals.length < 2) { alert("Complete all Semi-Finals first!"); return; }
-                const winners = semiFinals.map(m => m.score1 > m.score2 ? { id: m.team1_id, name: m.team1_name } : { id: m.team2_id, name: m.team2_name });
-                const losers = semiFinals.map(m => m.score1 > m.score2 ? { id: m.team2_id, name: m.team2_name } : { id: m.team1_id, name: m.team1_name });
-                await fetch('/api/generate-next-stage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tournament_type: tournamentType, stage: 'final', teams: [...winners, ...losers] }) });
-                onRefresh();
-              }}
-              disabled={matches.filter(m => m.tournament_type === tournamentType && m.stage === 'semi-final' && m.status === 'completed').length < 2}
-              className="flex items-center justify-center gap-2 bg-maroon-900 text-white py-3 rounded-xl font-bold hover:bg-black disabled:bg-stone-200 transition-all text-xs"
-            >
-              <Trophy className="w-4 h-4" />Generate Final & 3rd/4th
-            </button>
+            <div className="flex items-center justify-between gap-4 bg-amber-50 border border-amber-200 rounded-xl px-5 py-4">
+              <div>
+                <p className="text-sm font-black text-amber-800">Knockouts not yet started</p>
+                <p className="text-xs text-amber-600">Fill teams from standings first, then press Start Knockouts. Winners will auto-advance once active.</p>
+              </div>
+              <button onClick={startKnockouts} className="shrink-0 flex items-center gap-2 bg-maroon-900 text-white font-black text-sm px-5 py-3 rounded-xl hover:bg-black transition-all shadow-md">
+                <Trophy className="w-4 h-4" />Start Knockouts
+              </button>
+            </div>
           )}
         </div>
+
         {/* Extra match adder */}
         <div className="mt-6 pt-6 border-t border-stone-100">
           <div className="flex flex-col sm:flex-row items-start sm:items-end gap-3">
